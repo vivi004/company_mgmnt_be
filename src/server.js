@@ -21,6 +21,7 @@ const requestRoutes = require('./routes/requestRoutes');
 const orderLineRoutes = require('./routes/orderLineRoutes');
 const shopRoutes = require('./routes/shopRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
+const billRoutes = require('./routes/billRoutes');
 
 app.use('/api/employees', employeeRoutes);
 app.use('/api/auth', authRoutes);
@@ -28,6 +29,7 @@ app.use('/api/requests', requestRoutes);
 app.use('/api/order-lines', orderLineRoutes);
 app.use('/api/shops', shopRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/bills', billRoutes);
 
 
 app.get('/api/health', (req, res) => {

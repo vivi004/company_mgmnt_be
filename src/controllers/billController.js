@@ -90,3 +90,38 @@ exports.updateBill = async (req, res) => {
         res.status(500).json({ error: 'Failed to update bill' });
     }
 };
+
+exports.getBillsByDateRange = async (req, res) => {
+    const { startDate, endDate } = req.query;
+    try {
+        let query = 'SELECT * FROM bills WHERE status = "Verified"';
+        const params = [];
+
+        if (startDate) {
+            query += ' AND bill_date >= ?';
+            params.push(startDate);
+        }
+        if (endDate) {
+            // Add 1 day to endDate to include the full end day
+            const end = new Date(endDate);
+            end.setDate(end.getDate() + 1);
+            query += ' AND bill_date < ?';
+            params.push(end.toISOString().split('T')[0]);
+        }
+
+        query += ' ORDER BY bill_date DESC';
+
+        const [rows] = await db.query(query, params);
+        const mapped = rows.map(row => {
+            let cart = row.cart;
+            let custom_rates = row.custom_rates;
+            try { if (typeof cart === 'string') cart = JSON.parse(cart); } catch { cart = {}; }
+            try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
+            return { ...row, cart, custom_rates };
+        });
+        res.json(mapped);
+    } catch (err) {
+        console.error('Error fetching bills by date range:', err.message || err);
+        res.status(500).json({ error: 'Failed to fetch bills by date range', detail: err.message });
+    }
+};

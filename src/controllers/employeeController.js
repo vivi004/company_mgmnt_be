@@ -63,6 +63,17 @@ exports.updateEmployee = async (req, res) => {
     }
 };
 
+exports.updateProfilePic = async (req, res) => {
+    const { id } = req.params;
+    const { profile_pic } = req.body;
+    try {
+        await db.query('UPDATE employees SET profile_pic = ? WHERE id = ?', [profile_pic, id]);
+        res.json({ message: 'Profile picture updated successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
 exports.deleteEmployee = async (req, res) => {
     const { id } = req.params;
     try {

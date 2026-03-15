@@ -34,6 +34,7 @@ router.put('/:id',
     validate,
     employeeController.updateEmployee
 );
+router.put('/:id/profile-pic', authMiddleware, employeeController.updateProfilePic);
 router.delete('/:id', authMiddleware, employeeController.deleteEmployee);
 
 module.exports = router;

@@ -44,7 +44,8 @@ exports.login = async (req, res) => {
                 first_name: user.first_name,
                 last_name: user.last_name,
                 email: user.email || '',
-                accessible_orderlines: user.accessible_orderlines
+                accessible_orderlines: user.accessible_orderlines,
+                profile_pic: user.profile_pic || ''
             }
         });
     } catch (err) {

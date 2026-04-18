@@ -6,7 +6,7 @@ const getShopsByOrderLine = async (req, res) => {
     const { order_line_id } = req.params;
     try {
         const [shops] = await db.query(
-            `SELECT id, order_line_id, shop_name, village_name, owner_name, phone, phone2, balance, created_at
+            `SELECT id, order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_at
              FROM shops WHERE order_line_id = ? ORDER BY shop_name ASC`,
             [order_line_id]
         );
@@ -21,7 +21,7 @@ const getShopsByOrderLine = async (req, res) => {
 const getAllShops = async (req, res) => {
     try {
         const [shops] = await db.query(
-            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.phone, s.phone2, s.balance, s.created_at,
+            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
                     ol.name AS ol_village_name, ol.node_id
              FROM shops s
              JOIN order_lines ol ON s.order_line_id = ol.id
@@ -39,11 +39,11 @@ const createShop = async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { order_line_id, shop_name, village_name, owner_name, phone, phone2, balance } = req.body;
+    const { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
     try {
         const [result] = await db.query(
-            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, phone, phone2, balance) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [order_line_id, shop_name, village_name || '', owner_name || '', phone || '', phone2 || '', balance || 0]
+            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', balance || 0]
         );
         res.status(201).json({ id: result.insertId, message: 'Shop created successfully' });
     } catch (err) {
@@ -58,11 +58,11 @@ const updateShop = async (req, res) => {
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     const { id } = req.params;
-    const { shop_name, village_name, owner_name, phone, phone2, balance } = req.body;
+    const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
     try {
         await db.query(
-            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, phone = ?, phone2 = ?, balance = ? WHERE id = ?`,
-            [shop_name, village_name || '', owner_name || '', phone || '', phone2 || '', balance || 0, id]
+            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, balance = ? WHERE id = ?`,
+            [shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', balance || 0, id]
         );
         res.json({ message: 'Shop updated successfully' });
     } catch (err) {

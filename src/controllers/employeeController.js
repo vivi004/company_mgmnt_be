@@ -1,7 +1,7 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 
-const SALT_ROUNDS = 12;
+const SALT_ROUNDS = 8;
 
 exports.getAllEmployees = async (req, res) => {
     try {

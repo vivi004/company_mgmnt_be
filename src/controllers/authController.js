@@ -28,6 +28,18 @@ exports.login = async (req, res) => {
             });
         }
 
+        // Automatic Hash Downgrade logic for faster future logins
+        // Bcrypt hashes start with '$2b$CostFactor$...' or '$2a$CostFactor$...'
+        // If the cost factor is '12', downgrade it to '08' for improved login speed.
+        if (user.password && (user.password.startsWith('$2b$12$') || user.password.startsWith('$2a$12$'))) {
+            try {
+                const fasterHash = await bcrypt.hash(password, 8);
+                await db.query('UPDATE employees SET password = ? WHERE id = ?', [fasterHash, user.id]);
+            } catch (hashErr) {
+                console.error('Failed to downgrade hash for user:', user.username, hashErr);
+            }
+        }
+
         const token = jwt.sign(
             { id: user.id, role: user.role.toLowerCase() },
             process.env.JWT_SECRET,

@@ -8,7 +8,7 @@ require('dotenv').config();
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 
-const SALT_ROUNDS = 12;
+const SALT_ROUNDS = 8;
 
 async function migrate() {
     const db = await mysql.createConnection({

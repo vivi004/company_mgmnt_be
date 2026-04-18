@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -13,6 +14,7 @@ if (!process.env.JWT_SECRET) {
 }
 
 app.use(cors());
+app.use(compression());
 app.use(express.json());
 
 const employeeRoutes = require('./routes/employeeRoutes');

@@ -76,8 +76,11 @@ exports.createBill = async (req, res) => {
             ]
         );
 
-        // 5. Increment the next invoice number
-        await connection.query('UPDATE app_settings SET next_invoice_no = next_invoice_no + 1 WHERE id = 1');
+        // 5. Increment the next invoice number AND update the last generated number
+        await connection.query(
+            'UPDATE app_settings SET next_invoice_no = next_invoice_no + 1, last_invoice_no = ? WHERE id = 1',
+            [assignedInvoiceNo]
+        );
 
         await connection.commit();
         

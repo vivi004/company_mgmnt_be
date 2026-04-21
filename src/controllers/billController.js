@@ -2,12 +2,12 @@ const db = require('../config/db');
 
 exports.createBill = async (req, res) => {
     const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status } = req.body;
-    
+
     // Sanity checks for required fields
     if (!shop_name || !village_name || !cart) {
-        return res.status(400).json({ 
-            message: 'Missing required fields', 
-            detail: 'Shop name, village name, and cart are required.' 
+        return res.status(400).json({
+            message: 'Missing required fields',
+            detail: 'Shop name, village name, and cart are required.'
         });
     }
 
@@ -24,7 +24,7 @@ exports.createBill = async (req, res) => {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
-        
+
         await connection.query(`
             INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no)
             VALUES (1, 1001, 1000)
@@ -32,7 +32,7 @@ exports.createBill = async (req, res) => {
 
         // 2. Get and Lock the next invoice number
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
-        
+
         let assignedInvoiceNo;
         if (rows && rows.length > 0 && rows[0].next_invoice_no !== null && rows[0].next_invoice_no !== undefined) {
             assignedInvoiceNo = rows[0].next_invoice_no;
@@ -65,13 +65,13 @@ exports.createBill = async (req, res) => {
         const [result] = await connection.query(
             'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                String(assignedInvoiceNo), 
-                shop_name, 
-                village_name, 
-                cartJson, 
-                ratesJson, 
-                created_by || 'Mobile App', 
-                mysqlDate, 
+                String(assignedInvoiceNo),
+                shop_name,
+                village_name,
+                cartJson,
+                ratesJson,
+                created_by || 'Mobile App',
+                mysqlDate,
                 status || 'Unverified'
             ]
         );
@@ -83,11 +83,11 @@ exports.createBill = async (req, res) => {
         );
 
         await connection.commit();
-        
-        res.status(201).json({ 
-            message: 'Bill created successfully', 
-            id: result.insertId, 
-            invoice_no: assignedInvoiceNo 
+
+        res.status(201).json({
+            message: 'Bill created successfully',
+            id: result.insertId,
+            invoice_no: assignedInvoiceNo
         });
     } catch (err) {
         if (connection) {
@@ -98,7 +98,7 @@ exports.createBill = async (req, res) => {
             }
         }
         console.error('CRITICAL ERROR during createBill:', err);
-        res.status(500).json({ 
+        res.status(500).json({
             message: `Failed to create bill: ${err.message}`,
             detail: err.message,
             sqlMessage: err.sqlMessage

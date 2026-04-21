@@ -1,21 +1,107 @@
 const db = require('../config/db');
 
 exports.createBill = async (req, res) => {
-    const { invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status } = req.body;
-    try {
-        // Convert ISO 8601 date to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
-        const mysqlDate = bill_date
-            ? new Date(bill_date).toISOString().slice(0, 19).replace('T', ' ')
-            : new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status } = req.body;
+    
+    // Sanity checks for required fields
+    if (!shop_name || !village_name || !cart) {
+        return res.status(400).json({ 
+            message: 'Missing required fields', 
+            detail: 'Shop name, village name, and cart are required.' 
+        });
+    }
 
-        const [result] = await db.query(
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Ensure app_settings exists
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INT PRIMARY KEY,
+                next_invoice_no INT NOT NULL DEFAULT 1001,
+                last_invoice_no INT NOT NULL DEFAULT 1000,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        
+        await connection.query(`
+            INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no)
+            VALUES (1, 1001, 1000)
+        `);
+
+        // 2. Get and Lock the next invoice number
+        const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
+        
+        let assignedInvoiceNo;
+        if (rows && rows.length > 0 && rows[0].next_invoice_no !== null && rows[0].next_invoice_no !== undefined) {
+            assignedInvoiceNo = rows[0].next_invoice_no;
+        } else {
+            // Force initialize or fix if record is corrupt
+            await connection.query('INSERT INTO app_settings (id, next_invoice_no) VALUES (1, 1001) ON DUPLICATE KEY UPDATE next_invoice_no = IFNULL(next_invoice_no, 1001)');
+            const [retryRows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
+            assignedInvoiceNo = retryRows[0]?.next_invoice_no || 1001;
+        }
+
+        // Final safety check
+        if (!assignedInvoiceNo) assignedInvoiceNo = 1001;
+
+        // 3. Prepare the date
+        let mysqlDate;
+        try {
+            const d = bill_date ? new Date(bill_date) : new Date();
+            // Check for invalid date
+            if (isNaN(d.getTime())) throw new Error('Invalid date');
+            mysqlDate = d.toISOString().slice(0, 19).replace('T', ' ');
+        } catch (e) {
+            mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        }
+
+        // 4. Insert the bill
+        // Explicitly format JSON strings and handle defaults
+        const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
+        const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
+
+        const [result] = await connection.query(
             'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [invoice_no, shop_name, village_name, JSON.stringify(cart), JSON.stringify(custom_rates || {}), created_by, mysqlDate, status || 'Unverified']
+            [
+                String(assignedInvoiceNo), 
+                shop_name, 
+                village_name, 
+                cartJson, 
+                ratesJson, 
+                created_by || 'Mobile App', 
+                mysqlDate, 
+                status || 'Unverified'
+            ]
         );
-        res.status(201).json({ message: 'Bill created successfully', id: result.insertId, invoice_no });
+
+        // 5. Increment the next invoice number
+        await connection.query('UPDATE app_settings SET next_invoice_no = next_invoice_no + 1 WHERE id = 1');
+
+        await connection.commit();
+        
+        res.status(201).json({ 
+            message: 'Bill created successfully', 
+            id: result.insertId, 
+            invoice_no: assignedInvoiceNo 
+        });
     } catch (err) {
-        console.error('Error creating bill:', err.message || err);
-        res.status(500).json({ error: 'Failed to create bill', detail: err.message });
+        if (connection) {
+            try {
+                await connection.rollback();
+            } catch (rbErr) {
+                console.error('Rollback failed:', rbErr);
+            }
+        }
+        console.error('CRITICAL ERROR during createBill:', err);
+        res.status(500).json({ 
+            message: `Failed to create bill: ${err.message}`,
+            detail: err.message,
+            sqlMessage: err.sqlMessage
+        });
+    } finally {
+        if (connection) connection.release();
     }
 };
 

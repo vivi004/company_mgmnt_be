@@ -6,8 +6,16 @@ const getShopsByOrderLine = async (req, res) => {
     const { order_line_id } = req.params;
     try {
         const [shops] = await db.query(
-            `SELECT id, order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_at
-             FROM shops WHERE order_line_id = ? ORDER BY shop_name ASC`,
+            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
+                    CAST(EXISTS(
+                        SELECT 1 FROM bills b 
+                        WHERE b.shop_name = s.shop_name 
+                        AND b.village_name = s.village_name
+                        AND DATE(b.created_at) = CURDATE()
+                    ) AS UNSIGNED) as has_order_today
+             FROM shops s 
+             WHERE s.order_line_id = ? 
+             ORDER BY s.shop_name ASC`,
             [order_line_id]
         );
         res.json(shops);

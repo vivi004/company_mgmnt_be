@@ -111,7 +111,14 @@ exports.createBill = async (req, res) => {
 exports.getAllBills = async (req, res) => {
     try {
         // Primary ledger = only verified bills
-        const [rows] = await db.query('SELECT * FROM bills WHERE status = "Verified" ORDER BY bill_date DESC');
+        const [rows] = await db.query(`
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            FROM bills b 
+            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            WHERE b.status = "Verified" 
+            GROUP BY b.id
+            ORDER BY b.bill_date DESC
+        `);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -128,7 +135,14 @@ exports.getAllBills = async (req, res) => {
 
 exports.getUnverifiedBills = async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM bills WHERE status = "Unverified" ORDER BY bill_date DESC');
+        const [rows] = await db.query(`
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            FROM bills b 
+            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            WHERE b.status = "Unverified" 
+            GROUP BY b.id
+            ORDER BY b.bill_date DESC
+        `);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -183,22 +197,27 @@ exports.updateBill = async (req, res) => {
 exports.getBillsByDateRange = async (req, res) => {
     const { startDate, endDate } = req.query;
     try {
-        let query = 'SELECT * FROM bills WHERE status = "Verified"';
+        let query = `
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            FROM bills b 
+            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            WHERE b.status = "Verified"
+        `;
         const params = [];
 
         if (startDate) {
-            query += ' AND bill_date >= ?';
+            query += ' AND b.bill_date >= ?';
             params.push(startDate);
         }
         if (endDate) {
             // Add 1 day to endDate to include the full end day
             const end = new Date(endDate);
             end.setDate(end.getDate() + 1);
-            query += ' AND bill_date < ?';
+            query += ' AND b.bill_date < ?';
             params.push(end.toISOString().split('T')[0]);
         }
 
-        query += ' ORDER BY bill_date DESC';
+        query += ' GROUP BY b.id ORDER BY b.bill_date DESC';
 
         const [rows] = await db.query(query, params);
         const mapped = rows.map(row => {

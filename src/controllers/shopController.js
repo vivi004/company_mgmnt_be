@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { validationResult } = require('express-validator');
+const webhookService = require('../services/webhookService');
 
 // GET all shops for a specific order_line (village)
 const getShopsByOrderLine = async (req, res) => {
@@ -49,10 +50,24 @@ const createShop = async (req, res) => {
 
     const { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
     try {
+        const startBalance = parseFloat(balance) || 0;
         const [result] = await db.query(
             `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', balance || 0]
+            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', startBalance]
         );
+
+        // Push "Opening Balance" to Webhook
+        webhookService.sendTransactionToWebhook({
+            shop_id: result.insertId,
+            shop_name: shop_name,
+            village_name: village_name || '',
+            type: 'Registration',
+            amount: startBalance,
+            description: 'Shop Registered (Opening Balance)',
+            balance_after: startBalance,
+            created_by: 'System'
+        });
+
         res.status(201).json({ id: result.insertId, message: 'Shop created successfully' });
     } catch (err) {
         console.error('createShop error:', err);
@@ -91,4 +106,117 @@ const deleteShop = async (req, res) => {
     }
 };
 
-module.exports = { getShopsByOrderLine, getAllShops, createShop, updateShop, deleteShop };
+// POST Collect Payment
+const collectPayment = async (req, res) => {
+    const { id } = req.params;
+    const { amount, payment_method, description, created_by } = req.body;
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        if (shops.length === 0) throw new Error('Shop not found');
+        const shop = shops[0];
+
+        const payAmount = parseFloat(amount);
+        const newBalance = parseFloat(shop.balance) - payAmount;
+
+        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
+
+        await connection.query(
+            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff']
+        );
+
+        await connection.commit();
+
+        // Push to Webhook
+        webhookService.sendTransactionToWebhook({
+            shop_id: id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            type: 'Payment',
+            amount: -payAmount,
+            description: description || 'Payment Received',
+            balance_after: newBalance,
+            created_by: created_by || 'Staff'
+        });
+        res.json({ message: 'Payment recorded successfully', new_balance: newBalance });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
+// GET Shop Ledger
+const getShopLedger = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [transactions] = await db.query(
+            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY created_at DESC',
+            [id]
+        );
+        res.json(transactions);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch ledger' });
+    }
+};
+
+// POST Adjust Balance (Admin only)
+const adjustBalance = async (req, res) => {
+    const { id } = req.params;
+    const { amount, type, description, created_by } = req.body; // type: 'Adjustment'
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        if (shops.length === 0) throw new Error('Shop not found');
+        const shop = shops[0];
+
+        const adjAmount = parseFloat(amount);
+        const newBalance = parseFloat(shop.balance) + adjAmount; // amount can be negative
+
+        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
+
+        await connection.query(
+            'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+            [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin']
+        );
+
+        await connection.commit();
+
+        // Push to Webhook
+        webhookService.sendTransactionToWebhook({
+            shop_id: id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            type: 'Adjustment',
+            amount: adjAmount,
+            description: description || 'Manual Adjustment',
+            balance_after: newBalance,
+            created_by: created_by || 'Admin'
+        });
+        res.json({ message: 'Balance adjusted successfully', new_balance: newBalance });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
+module.exports = { 
+    getShopsByOrderLine, 
+    getAllShops, 
+    createShop, 
+    updateShop, 
+    deleteShop,
+    collectPayment,
+    getShopLedger,
+    adjustBalance
+};

@@ -2,7 +2,15 @@ const db = require('../config/db');
 
 exports.getAllOrderLines = async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM order_lines ORDER BY created_at DESC');
+        const [rows] = await db.query(`
+            SELECT ol.*, 
+                   COALESCE(SUM(s.balance), 0) as total_balance,
+                   COUNT(s.id) as shop_count
+            FROM order_lines ol
+            LEFT JOIN shops s ON ol.id = s.order_line_id
+            GROUP BY ol.id
+            ORDER BY ol.created_at DESC
+        `);
         res.json(rows);
     } catch (err) {
         console.error('Error fetching order lines:', err);

@@ -19,4 +19,9 @@ router.post('/', authMiddleware, shopValidation, shopController.createShop);
 router.put('/:id', authMiddleware, updateValidation, shopController.updateShop);
 router.delete('/:id', authMiddleware, shopController.deleteShop);
 
+// Financial Routes
+router.post('/:id/collect-payment', authMiddleware, shopController.collectPayment);
+router.get('/:id/ledger', authMiddleware, shopController.getShopLedger);
+router.post('/:id/adjust-balance', authMiddleware, shopController.adjustBalance);
+
 module.exports = router;

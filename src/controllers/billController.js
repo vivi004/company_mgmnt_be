@@ -1,9 +1,9 @@
 const db = require('../config/db');
+const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status } = req.body;
+    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount } = req.body;
 
-    // Sanity checks for required fields
     if (!shop_name || !village_name || !cart) {
         return res.status(400).json({
             message: 'Missing required fields',
@@ -15,7 +15,18 @@ exports.createBill = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Ensure app_settings exists
+        // 1. Get the shop ID and current balance
+        const [shops] = await connection.query(
+            'SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE',
+            [shop_name, village_name]
+        );
+
+        if (shops.length === 0) {
+            throw new Error(`Shop "${shop_name}" in "${village_name}" not found.`);
+        }
+        const shop = shops[0];
+
+        // 2. Ensure app_settings exists
         await connection.query(`
             CREATE TABLE IF NOT EXISTS app_settings (
                 id INT PRIMARY KEY,
@@ -30,53 +41,44 @@ exports.createBill = async (req, res) => {
             VALUES (1, 1001, 1000)
         `);
 
-        // 2. Get and Lock the next invoice number
+        // 3. Get and Lock the next invoice number
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
+        let assignedInvoiceNo = rows[0]?.next_invoice_no || 1001;
 
-        let assignedInvoiceNo;
-        if (rows && rows.length > 0 && rows[0].next_invoice_no !== null && rows[0].next_invoice_no !== undefined) {
-            assignedInvoiceNo = rows[0].next_invoice_no;
-        } else {
-            // Force initialize or fix if record is corrupt
-            await connection.query('INSERT INTO app_settings (id, next_invoice_no) VALUES (1, 1001) ON DUPLICATE KEY UPDATE next_invoice_no = IFNULL(next_invoice_no, 1001)');
-            const [retryRows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
-            assignedInvoiceNo = retryRows[0]?.next_invoice_no || 1001;
-        }
-
-        // Final safety check
-        if (!assignedInvoiceNo) assignedInvoiceNo = 1001;
-
-        // 3. Prepare the date
+        // 4. Prepare the date
         let mysqlDate;
         try {
             const d = bill_date ? new Date(bill_date) : new Date();
-            // Check for invalid date
             if (isNaN(d.getTime())) throw new Error('Invalid date');
             mysqlDate = d.toISOString().slice(0, 19).replace('T', ' ');
         } catch (e) {
             mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
 
-        // 4. Insert the bill
-        // Explicitly format JSON strings and handle defaults
+        // 5. Insert the bill
         const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
         const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
+        const amount = parseFloat(total_amount) || 0;
 
-        const [result] = await connection.query(
-            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [
-                String(assignedInvoiceNo),
-                shop_name,
-                village_name,
-                cartJson,
-                ratesJson,
-                created_by || 'Mobile App',
-                mysqlDate,
-                status || 'Unverified'
-            ]
+        const [billResult] = await connection.query(
+            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Mobile App', mysqlDate, status || 'Unverified', amount]
         );
 
-        // 5. Increment the next invoice number AND update the last generated number
+        // 6. Update Shop Balance
+        const newBalance = parseFloat(shop.balance) + amount;
+        await connection.query(
+            'UPDATE shops SET balance = ? WHERE id = ?',
+            [newBalance, shop.id]
+        );
+
+        // 7. Create Shop Transaction (Ledger Entry)
+        await connection.query(
+            'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Mobile App']
+        );
+
+        // 8. Increment the next invoice number
         await connection.query(
             'UPDATE app_settings SET next_invoice_no = next_invoice_no + 1, last_invoice_no = ? WHERE id = 1',
             [assignedInvoiceNo]
@@ -84,24 +86,31 @@ exports.createBill = async (req, res) => {
 
         await connection.commit();
 
+        // 9. Push to Webhook (Background)
+        webhookService.sendTransactionToWebhook({
+            shop_id: shop.id,
+            shop_name: shop_name,
+            village_name: village_name,
+            type: 'Bill',
+            amount: amount,
+            description: `Invoice #${assignedInvoiceNo}`,
+            balance_after: newBalance,
+            created_by: created_by || 'Mobile App',
+            reference_id: billResult.insertId
+        });
+
         res.status(201).json({
             message: 'Bill created successfully',
-            id: result.insertId,
-            invoice_no: assignedInvoiceNo
+            id: billResult.insertId,
+            invoice_no: assignedInvoiceNo,
+            new_balance: newBalance
         });
     } catch (err) {
-        if (connection) {
-            try {
-                await connection.rollback();
-            } catch (rbErr) {
-                console.error('Rollback failed:', rbErr);
-            }
-        }
+        if (connection) await connection.rollback();
         console.error('CRITICAL ERROR during createBill:', err);
         res.status(500).json({
             message: `Failed to create bill: ${err.message}`,
-            detail: err.message,
-            sqlMessage: err.sqlMessage
+            detail: err.message
         });
     } finally {
         if (connection) connection.release();

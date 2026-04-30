@@ -140,6 +140,7 @@ const syncAllShopsToLedger = async (req, res) => {
                 description: 'Initial Bulk Sync',
                 balance_after: parseFloat(shop.balance),
                 created_by: 'Admin Sync',
+                payment_method: 'Opening Balance',
                 timestamp: new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace('T', ' ').split('.')[0]
             }));
 

@@ -94,6 +94,7 @@ exports.createBill = async (req, res) => {
             type: 'Bill',
             amount: amount,
             description: `Invoice #${assignedInvoiceNo}`,
+            balance_before: shop.balance,
             balance_after: newBalance,
             created_by: created_by || 'Mobile App',
             reference_id: billResult.insertId

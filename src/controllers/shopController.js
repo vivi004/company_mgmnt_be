@@ -64,6 +64,7 @@ const createShop = async (req, res) => {
             type: 'Registration',
             amount: startBalance,
             description: 'Shop Registered (Opening Balance)',
+            balance_before: 0,
             balance_after: startBalance,
             created_by: 'System'
         });
@@ -190,6 +191,7 @@ const collectPayment = async (req, res) => {
             amount: -payAmount,
             payment_method: payment_method || 'Cash',
             description: description || 'Payment Received',
+            balance_before: parseFloat(shop.balance) || 0,
             balance_after: newBalance,
             created_by: created_by || 'Staff'
         });
@@ -249,6 +251,7 @@ const adjustBalance = async (req, res) => {
             type: 'Adjustment',
             amount: adjAmount,
             description: description || 'Manual Adjustment',
+            balance_before: parseFloat(shop.balance) || 0,
             balance_after: newBalance,
             created_by: created_by || 'Admin'
         });

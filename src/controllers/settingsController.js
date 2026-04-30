@@ -7,13 +7,26 @@ const ensureSettings = async () => {
             id INT PRIMARY KEY DEFAULT 1,
             next_invoice_no INT NOT NULL DEFAULT 1001,
             last_invoice_no INT NOT NULL DEFAULT 1000,
+            ledger_sheet_url TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
     `);
+    // Safely add column if it doesn't exist
+    try {
+        await db.query('ALTER TABLE app_settings ADD COLUMN ledger_sheet_url TEXT');
+    } catch (e) {
+        // Ignore error if column already exists
+    }
     // Insert default row if not present
     await db.query(`
-        INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no)
-        VALUES (1, 1001, 1000)
+        INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)
+        VALUES (1, 1001, 1000, 'https://docs.google.com/spreadsheets/d/1slf-BRcvxU6OzKYxnzGOFeJz38IGN--nnAw0gpXWLiI/edit?gid=0#gid=0')
+    `);
+    // Also update it if it's currently empty to ensure the user's provided link is saved
+    await db.query(`
+        UPDATE app_settings 
+        SET ledger_sheet_url = 'https://docs.google.com/spreadsheets/d/1slf-BRcvxU6OzKYxnzGOFeJz38IGN--nnAw0gpXWLiI/edit?gid=0#gid=0' 
+        WHERE id = 1 AND (ledger_sheet_url IS NULL OR ledger_sheet_url = '')
     `);
 };
 
@@ -65,7 +78,7 @@ exports.getInvoiceSettings = async (req, res) => {
     try {
         await ensureSettings();
         await ensureShopsColumns(); // ensure phone/phone2 columns exist in shops
-        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no FROM app_settings WHERE id = 1');
+        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url FROM app_settings WHERE id = 1');
         res.json(rows[0]);
     } catch (err) {
         console.error('Error getting invoice settings:', err);
@@ -83,6 +96,7 @@ exports.updateInvoiceSettings = async (req, res) => {
         const values = [];
         if (next_invoice_no !== undefined) { fields.push('next_invoice_no = ?'); values.push(next_invoice_no); }
         if (last_invoice_no !== undefined) { fields.push('last_invoice_no = ?'); values.push(last_invoice_no); }
+        if (ledger_sheet_url !== undefined) { fields.push('ledger_sheet_url = ?'); values.push(ledger_sheet_url); }
         if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
         await db.query(`UPDATE app_settings SET ${fields.join(', ')} WHERE id = 1`, values);
         res.json({ message: 'Invoice settings updated' });

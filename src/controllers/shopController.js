@@ -98,11 +98,53 @@ const updateShop = async (req, res) => {
 const deleteShop = async (req, res) => {
     const { id } = req.params;
     try {
+        // Fetch details before deletion for the log
+        const [shops] = await db.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ?', [id]);
+        if (shops.length > 0) {
+            const shop = shops[0];
+            // Log deletion to Webhook
+            webhookService.sendTransactionToWebhook({
+                shop_id: id,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                type: 'Deletion',
+                amount: 0,
+                description: 'Shop Deleted / Account Closed',
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+        }
         await db.query(`DELETE FROM shops WHERE id = ?`, [id]);
         res.json({ message: 'Shop deleted successfully' });
     } catch (err) {
         console.error('deleteShop error:', err);
         res.status(500).json({ error: 'Failed to delete shop' });
+    }
+};
+
+// Sync All Shops to Ledger (One-time export)
+const syncAllShopsToLedger = async (req, res) => {
+    try {
+        const [shops] = await db.query('SELECT id, shop_name, village_name, balance FROM shops');
+        
+        // Push each shop as an "Opening Balance"
+        for (const shop of shops) {
+            await webhookService.sendTransactionToWebhook({
+                shop_id: shop.id,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                type: 'Opening Balance',
+                amount: parseFloat(shop.balance),
+                description: 'Initial Bulk Sync',
+                balance_after: parseFloat(shop.balance),
+                created_by: 'Admin Sync'
+            });
+        }
+        
+        res.json({ message: `Successfully pushed ${shops.length} shops to ledger.` });
+    } catch (err) {
+        console.error('syncAllShopsToLedger error:', err);
+        res.status(500).json({ error: 'Failed to sync shops' });
     }
 };
 
@@ -218,5 +260,6 @@ module.exports = {
     deleteShop,
     collectPayment,
     getShopLedger,
-    adjustBalance
+    adjustBalance,
+    syncAllShopsToLedger
 };

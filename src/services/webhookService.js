@@ -12,5 +12,6 @@ exports.sendTransactionToWebhook = async (transactionData) => {
         console.log('Transaction pushed to webhook successfully');
     } catch (err) {
         console.error('Failed to push transaction to webhook:', err.message);
+        throw new Error(`Webhook push failed: ${err.message}`);
     }
 };

@@ -15,6 +15,7 @@ exports.sendTransactionToWebhook = async (transactionData) => {
         
         await axios.post(url, {
             ...transactionData,
+            payment_method: transactionData.payment_method || 'N/A',
             timestamp: istTimestamp
         });
         console.log('Transaction pushed to webhook successfully');

@@ -187,6 +187,7 @@ const collectPayment = async (req, res) => {
             village_name: shop.village_name,
             type: 'Payment',
             amount: -payAmount,
+            payment_method: payment_method || 'Cash',
             description: description || 'Payment Received',
             balance_after: newBalance,
             created_by: created_by || 'Staff'

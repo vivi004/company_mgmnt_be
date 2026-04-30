@@ -127,23 +127,28 @@ const syncAllShopsToLedger = async (req, res) => {
     try {
         const [shops] = await db.query('SELECT id, shop_name, village_name, balance FROM shops');
         
-        // Prepare bulk data
-        const bulkData = shops.map(shop => ({
-            shop_id: shop.id,
-            shop_name: shop.shop_name,
-            village_name: shop.village_name,
-            type: 'Opening Balance',
-            amount: parseFloat(shop.balance),
-            description: 'Initial Bulk Sync',
-            balance_after: parseFloat(shop.balance),
-            created_by: 'Admin Sync',
-            timestamp: new Date().toISOString()
-        }));
+        // Split into batches of 100 to prevent timeouts
+        const BATCH_SIZE = 100;
+        for (let i = 0; i < shops.length; i += BATCH_SIZE) {
+            const batch = shops.slice(i, i + BATCH_SIZE);
+            const bulkData = batch.map(shop => ({
+                shop_id: shop.id,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                type: 'Opening Balance',
+                amount: parseFloat(shop.balance),
+                description: 'Initial Bulk Sync',
+                balance_after: parseFloat(shop.balance),
+                created_by: 'Admin Sync',
+                timestamp: new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace('T', ' ').split('.')[0]
+            }));
 
-        // Send everything in ONE request
-        await webhookService.sendTransactionToWebhook(bulkData);
+            // Send this batch
+            await webhookService.sendTransactionToWebhook(bulkData);
+            console.log(`Synced batch ${Math.floor(i/BATCH_SIZE) + 1} of ${Math.ceil(shops.length/BATCH_SIZE)}`);
+        }
         
-        res.json({ message: `Successfully pushed ${shops.length} shops to ledger.` });
+        res.json({ message: `Successfully pushed ${shops.length} shops to ledger in batches.` });
     } catch (err) {
         console.error('syncAllShopsToLedger error:', err);
         res.status(500).json({ error: `Sync failed: ${err.message}` });

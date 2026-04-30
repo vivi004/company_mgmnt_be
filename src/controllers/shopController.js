@@ -127,24 +127,26 @@ const syncAllShopsToLedger = async (req, res) => {
     try {
         const [shops] = await db.query('SELECT id, shop_name, village_name, balance FROM shops');
         
-        // Push each shop as an "Opening Balance"
-        for (const shop of shops) {
-            await webhookService.sendTransactionToWebhook({
-                shop_id: shop.id,
-                shop_name: shop.shop_name,
-                village_name: shop.village_name,
-                type: 'Opening Balance',
-                amount: parseFloat(shop.balance),
-                description: 'Initial Bulk Sync',
-                balance_after: parseFloat(shop.balance),
-                created_by: 'Admin Sync'
-            });
-        }
+        // Prepare bulk data
+        const bulkData = shops.map(shop => ({
+            shop_id: shop.id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            type: 'Opening Balance',
+            amount: parseFloat(shop.balance),
+            description: 'Initial Bulk Sync',
+            balance_after: parseFloat(shop.balance),
+            created_by: 'Admin Sync',
+            timestamp: new Date().toISOString()
+        }));
+
+        // Send everything in ONE request
+        await webhookService.sendTransactionToWebhook(bulkData);
         
         res.json({ message: `Successfully pushed ${shops.length} shops to ledger.` });
     } catch (err) {
         console.error('syncAllShopsToLedger error:', err);
-        res.status(500).json({ error: 'Failed to sync shops' });
+        res.status(500).json({ error: `Sync failed: ${err.message}` });
     }
 };
 

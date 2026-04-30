@@ -47,6 +47,15 @@ app.use((err, req, res, _next) => {
     res.status(500).json({ error: 'An internal server error occurred.' });
 });
 
+// Prevent crash on unhandled rejections (like DB connection failure)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception thrown:', err.stack);
+});
+
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
     console.log('Press Ctrl+C to stop');

@@ -2,7 +2,7 @@ const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount } = req.body;
+    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
 
     if (!shop_name || !village_name || !cart) {
         return res.status(400).json({
@@ -54,6 +54,16 @@ exports.createBill = async (req, res) => {
         } catch (e) {
             mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
+        
+        let mysqlDeliveryDate = null;
+        if (delivery_date) {
+            try {
+                const d = new Date(delivery_date);
+                if (!isNaN(d.getTime())) {
+                    mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
+                }
+            } catch(e) {}
+        }
 
         // 5. Insert the bill
         const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
@@ -61,8 +71,8 @@ exports.createBill = async (req, res) => {
         const amount = parseFloat(total_amount) || 0;
 
         const [billResult] = await connection.query(
-            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Mobile App', mysqlDate, status || 'Unverified', amount]
+            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Mobile App', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount]
         );
 
         // 6. Update Shop Balance
@@ -74,8 +84,8 @@ exports.createBill = async (req, res) => {
 
         // 7. Create Shop Transaction (Ledger Entry)
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Mobile App']
+            'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Mobile App', mysqlDeliveryDate || mysqlDate]
         );
 
         // 8. Increment the next invoice number
@@ -127,7 +137,7 @@ exports.getAllBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
             WHERE b.status = "Verified" 
             GROUP BY b.id
-            ORDER BY b.bill_date DESC
+            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC
         `);
         const mapped = rows.map(row => {
             let cart = row.cart;
@@ -151,7 +161,7 @@ exports.getUnverifiedBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
             WHERE b.status = "Unverified" 
             GROUP BY b.id
-            ORDER BY b.bill_date DESC
+            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC
         `);
         const mapped = rows.map(row => {
             let cart = row.cart;
@@ -180,27 +190,135 @@ exports.verifyBill = async (req, res) => {
 
 exports.deleteBill = async (req, res) => {
     const { id } = req.params;
+    const connection = await db.getConnection();
     try {
-        await db.query('DELETE FROM bills WHERE id = ?', [id]);
-        res.json({ message: 'Bill deleted successfully' });
+        await connection.beginTransaction();
+
+        // 1. Get bill details
+        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no FROM bills WHERE id = ?', [id]);
+        if (bills.length === 0) throw new Error('Bill not found');
+        const bill = bills[0];
+
+        // 2. Get shop details
+        const [shops] = await connection.query('SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE', [bill.shop_name, bill.village_name]);
+        if (shops.length > 0) {
+            const shop = shops[0];
+            const amount = parseFloat(bill.total_amount);
+            const newBalance = parseFloat(shop.balance) - amount;
+
+            // 3. Update shop balance
+            await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
+
+            // 4. Create "Cancellation" Ledger Entry
+            await connection.query(
+                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, 'Admin']
+            );
+
+            // 5. Push to Webhook
+            webhookService.sendTransactionToWebhook({
+                shop_id: shop.id,
+                shop_name: bill.shop_name,
+                village_name: bill.village_name,
+                type: 'Cancellation',
+                amount: -amount,
+                description: `Cancelled Invoice #${bill.invoice_no}`,
+                balance_after: newBalance,
+                created_by: 'Admin'
+            });
+        }
+
+        // 6. Delete the bill
+        await connection.query('DELETE FROM bills WHERE id = ?', [id]);
+
+        await connection.commit();
+        res.json({ message: 'Bill deleted and balance reversed successfully' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('Error deleting bill:', err);
         res.status(500).json({ error: 'Failed to delete bill' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
 exports.updateBill = async (req, res) => {
     const { id } = req.params;
-    const { cart, custom_rates } = req.body;
+    const { cart, custom_rates, total_amount } = req.body;
+    const connection = await db.getConnection();
     try {
-        await db.query(
-            'UPDATE bills SET cart = ?, custom_rates = ? WHERE id = ?',
-            [JSON.stringify(cart), JSON.stringify(custom_rates || {}), id]
+        await connection.beginTransaction();
+
+        // 1. Get old bill details
+        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no FROM bills WHERE id = ? FOR UPDATE', [id]);
+        if (bills.length === 0) throw new Error('Bill not found');
+        const bill = bills[0];
+
+        // 2. Calculate difference
+        const oldAmount = parseFloat(bill.total_amount);
+        const newAmount = parseFloat(total_amount);
+        const diff = newAmount - oldAmount;
+
+        // 3. Update shop balance if there's a difference
+        if (diff !== 0) {
+            const [shops] = await connection.query('SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE', [bill.shop_name, bill.village_name]);
+            if (shops.length > 0) {
+                const shop = shops[0];
+                const newBalance = parseFloat(shop.balance) + diff;
+                await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
+
+                // 4. Create Ledger Entry for adjustment
+                await connection.query(
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, 'Admin']
+                );
+
+                // 5. Push to Webhook
+                webhookService.sendTransactionToWebhook({
+                    shop_id: shop.id,
+                    shop_name: bill.shop_name,
+                    village_name: bill.village_name,
+                    type: 'Adjustment',
+                    amount: diff,
+                    description: `Update Invoice #${bill.invoice_no}`,
+                    balance_after: newBalance,
+                    created_by: 'Admin'
+                });
+            }
+        }
+
+        // 6. Update the bill
+        let mysqlDeliveryDate = null;
+        if (req.body.delivery_date) {
+            try {
+                const d = new Date(req.body.delivery_date);
+                if (!isNaN(d.getTime())) {
+                    mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
+                }
+            } catch(e) {}
+        }
+
+        await connection.query(
+            'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ? WHERE id = ?',
+            [JSON.stringify(cart), JSON.stringify(custom_rates || {}), newAmount, mysqlDeliveryDate, id]
         );
-        res.json({ message: 'Bill updated successfully' });
+
+        // 7. Update transaction date in ledger if it exists for this bill
+        if (mysqlDeliveryDate) {
+            await connection.query(
+                'UPDATE shop_transactions SET transaction_date = ? WHERE reference_id = ? AND type = "Bill"',
+                [mysqlDeliveryDate, id]
+            );
+        }
+
+        await connection.commit();
+        res.json({ message: 'Bill updated and balance adjusted successfully' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('Error updating bill:', err);
         res.status(500).json({ error: 'Failed to update bill' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 

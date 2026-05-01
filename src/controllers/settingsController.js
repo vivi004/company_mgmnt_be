@@ -89,7 +89,7 @@ exports.getInvoiceSettings = async (req, res) => {
 // PUT /api/settings/invoice
 // Body: { next_invoice_no, last_invoice_no }
 exports.updateInvoiceSettings = async (req, res) => {
-    const { next_invoice_no, last_invoice_no } = req.body;
+    const { next_invoice_no, last_invoice_no, ledger_sheet_url } = req.body;
     try {
         await ensureSettings();
         const fields = [];

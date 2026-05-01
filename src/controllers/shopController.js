@@ -175,9 +175,10 @@ const collectPayment = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
+        const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff']
+            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
         );
 
         await connection.commit();
@@ -207,10 +208,12 @@ const collectPayment = async (req, res) => {
 // GET Shop Ledger
 const getShopLedger = async (req, res) => {
     const { id } = req.params;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = parseInt(req.query.skip) || 0;
     try {
         const [transactions] = await db.query(
-            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY created_at DESC',
-            [id]
+            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY transaction_date DESC, id DESC LIMIT ? OFFSET ?',
+            [id, limit, skip]
         );
         res.json(transactions);
     } catch (err) {
@@ -236,9 +239,10 @@ const adjustBalance = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
+        const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?)',
-            [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin']
+            'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
         );
 
         await connection.commit();

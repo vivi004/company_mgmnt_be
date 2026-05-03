@@ -101,14 +101,17 @@ exports.createBill = async (req, res) => {
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
         let assignedInvoiceNo = rows[0]?.next_invoice_no || 1001;
 
-        // 4. Prepare the date
+        // 4. Prepare the date in IST
         let mysqlDate;
         try {
             const d = bill_date ? new Date(bill_date) : new Date();
             if (isNaN(d.getTime())) throw new Error('Invalid date');
-            mysqlDate = d.toISOString().slice(0, 19).replace('T', ' ');
+            // Add IST offset (+5.5 hours) for MySQL storage
+            const istDate = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+            mysqlDate = istDate.toISOString().slice(0, 19).replace('T', ' ');
         } catch (e) {
-            mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
         }
 
         let mysqlDeliveryDate = null;
@@ -256,8 +259,11 @@ exports.deleteBill = async (req, res) => {
         const bill = bills[0];
 
         // 1b. Get the current user's name for the ledger
-        const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
-        const currentUser = users[0];
+        let currentUser = null;
+        if (req.user && req.user.id) {
+            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            currentUser = users[0];
+        }
         const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (bill.created_by || 'Admin');
 
         // 2. Get shop details
@@ -317,8 +323,11 @@ exports.updateBill = async (req, res) => {
         const bill = bills[0];
 
         // 1b. Get current user's name for the ledger
-        const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
-        const currentUser = users[0];
+        let currentUser = null;
+        if (req.user && req.user.id) {
+            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            currentUser = users[0];
+        }
         const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (req.body.created_by || bill.created_by || 'Admin');
 
         // 2. Calculate difference
@@ -328,7 +337,10 @@ exports.updateBill = async (req, res) => {
 
         // 3. Update shop balance if there's a difference
         if (diff !== 0) {
-            const [shops] = await connection.query('SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE', [bill.shop_name, bill.village_name]);
+            const [shops] = await connection.query(
+                'SELECT id, balance FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE', 
+                [bill.shop_name, bill.village_name]
+            );
             if (shops.length > 0) {
                 const shop = shops[0];
                 const newBalance = parseFloat(shop.balance) + diff;
@@ -356,19 +368,26 @@ exports.updateBill = async (req, res) => {
         }
 
         // 6. Update the bill
-        let mysqlDeliveryDate = bill.delivery_date ? new Date(bill.delivery_date).toISOString().slice(0, 19).replace('T', ' ') : null;
+        let mysqlDeliveryDate = bill.delivery_date ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') : null;
         if (req.body.delivery_date) {
             try {
                 const d = new Date(req.body.delivery_date);
                 if (!isNaN(d.getTime())) {
-                    mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
+                    const istD = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+                    mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
                 }
             } catch (e) { }
         }
 
         await connection.query(
             'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ? WHERE id = ?',
-            [JSON.stringify(cart || bill.cart), JSON.stringify(custom_rates || bill.custom_rates || {}), newAmount, mysqlDeliveryDate, id]
+            [
+                JSON.stringify(cart !== undefined ? cart : bill.cart), 
+                JSON.stringify(custom_rates !== undefined ? custom_rates : bill.custom_rates), 
+                newAmount, 
+                mysqlDeliveryDate, 
+                id
+            ]
         );
 
         // 7. Update transaction date in ledger if it exists for this bill

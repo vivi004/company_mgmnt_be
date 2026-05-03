@@ -20,7 +20,7 @@ exports.sendTransactionToWebhook = async (transactionData) => {
         });
         console.log('Transaction pushed to webhook successfully');
     } catch (err) {
-        console.error('Failed to push transaction to webhook:', err.message);
-        throw new Error(`Webhook push failed: ${err.message}`);
+        console.error('CRITICAL: Failed to push transaction to ledger (Google Sheets):', err.message);
+        // We do NOT throw here to prevent ledger issues from crashing the primary app
     }
 };

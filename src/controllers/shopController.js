@@ -95,61 +95,73 @@ const updateShop = async (req, res) => {
 
     const { id } = req.params;
     const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
+    const connection = await db.getConnection();
     try {
-        // Fetch current shop to check for balance changes
-        const [oldShops] = await db.query('SELECT balance FROM shops WHERE id = ?', [id]);
-        if (oldShops.length === 0) return res.status(404).json({ error: 'Shop not found' });
+        await connection.beginTransaction();
+
+        // Fetch current shop to check for balance and name changes
+        const [oldShops] = await connection.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        if (oldShops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
+        }
         
-        const oldBalance = parseFloat(oldShops[0].balance) || 0;
+        const oldShop = oldShops[0];
+        const oldBalance = parseFloat(oldShop.balance) || 0;
         const newBalance = parseFloat(balance) || 0;
 
-        await db.query(
+        // 1. Update the shop record
+        await connection.query(
             `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, balance = ? WHERE id = ?`,
             [shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', newBalance, id]
         );
 
-        // If balance was changed manually in the edit modal, log it to the ledger/webhook
+        // 2. If name or village changed, update ALL related bills to prevent orphans
+        if (oldShop.shop_name !== shop_name || oldShop.village_name !== village_name) {
+            await connection.query(
+                'UPDATE bills SET shop_name = ?, village_name = ? WHERE shop_name = ? AND village_name = ?',
+                [shop_name, village_name || '', oldShop.shop_name, oldShop.village_name]
+            );
+        }
+
+        // 3. If balance was changed manually, log it
         if (oldBalance !== newBalance) {
-            const diff = newBalance - oldBalance;
-            let { created_by } = req.body;
-            
-            // Safety check: If created_by is missing, fetch the acting user's name from the DB
-            if (!created_by && req.user && req.user.id) {
-                try {
-                    const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
-                    if (users.length > 0) {
-                        created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
-                    }
-                } catch (e) {
-                    console.error('Failed to fetch user name for shop update adjustment:', e);
+            let actingUserName = 'Admin';
+            if (req.user && req.user.id) {
+                const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+                if (users.length > 0) {
+                    actingUserName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
                 }
             }
 
-            // Create a local transaction record
-            const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
-            await db.query(
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
+            await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [id, 'Adjustment', diff, 'Manual Balance Update (Edit Shop)', newBalance, created_by || 'Admin', mysqlDate]
+                [id, 'Adjustment', newBalance - oldBalance, 'Manual Balance Update (Edit Shop)', newBalance, actingUserName, mysqlDate]
             );
 
-            // Push to Webhook
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
                 shop_name: shop_name,
                 village_name: village_name || '',
                 type: 'Adjustment',
-                amount: diff,
+                amount: newBalance - oldBalance,
                 description: 'Manual Balance Update (Edit Shop)',
                 balance_before: oldBalance,
                 balance_after: newBalance,
-                created_by: created_by || 'Admin'
+                created_by: actingUserName
             });
         }
 
-        res.json({ message: 'Shop updated successfully' });
+        await connection.commit();
+        res.json({ message: 'Shop and related records updated successfully' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('updateShop error:', err);
         res.status(500).json({ error: 'Failed to update shop' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
@@ -277,7 +289,8 @@ const collectPayment = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
-        const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
@@ -353,7 +366,8 @@ const adjustBalance = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
-        const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]

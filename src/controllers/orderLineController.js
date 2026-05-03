@@ -81,10 +81,39 @@ exports.approveDeleteRequest = async (req, res) => {
         if (requests.length === 0) return res.status(404).json({ error: 'Request not found' });
 
         const request = requests[0];
-        // Delete the order line
-        await db.query('DELETE FROM order_lines WHERE id = ?', [request.order_line_id]);
-        // Update approved request status
-        await db.query('UPDATE order_line_requests SET status = "Approved" WHERE id = ?', [id]);
+        
+        // Use a transaction for the deletion process
+        const connection = await db.getConnection();
+        try {
+            await connection.beginTransaction();
+            
+            // 1. Delete transactions for all shops in this village
+            await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
+            
+            // 2. Delete bills for all shops in this village (matched by name/village)
+            await connection.query(`
+                DELETE FROM bills 
+                WHERE (shop_name, village_name) IN (
+                    SELECT shop_name, village_name FROM shops WHERE order_line_id = ?
+                )
+            `, [request.order_line_id]);
+
+            // 3. Delete the shops
+            await connection.query('DELETE FROM shops WHERE order_line_id = ?', [request.order_line_id]);
+            
+            // 4. Delete the order line
+            await connection.query('DELETE FROM order_lines WHERE id = ?', [request.order_line_id]);
+            
+            // Update approved request status
+            await connection.query('UPDATE order_line_requests SET status = "Approved" WHERE id = ?', [id]);
+            
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
         // Clean up any other orphaned pending requests for the same order line
         await db.query(
             'UPDATE order_line_requests SET status = "Cancelled" WHERE order_line_id = ? AND status = "Pending"',
@@ -112,11 +141,30 @@ exports.updateOrderLine = async (req, res) => {
     const { id } = req.params;
     const { name, node_id } = req.body;
     try {
-        await db.query(
-            'UPDATE order_lines SET name = ?, node_id = ? WHERE id = ?',
-            [name, node_id, id]
-        );
-        res.json({ message: 'Order line updated successfully' });
+        const connection = await db.getConnection();
+        try {
+            await connection.beginTransaction();
+            
+            // 1. Update the order line
+            await connection.query(
+                'UPDATE order_lines SET name = ?, node_id = ? WHERE id = ?',
+                [name, node_id, id]
+            );
+            
+            // 2. Sync the village_name in the shops table for consistency
+            await connection.query(
+                'UPDATE shops SET village_name = ? WHERE order_line_id = ?',
+                [name, id]
+            );
+            
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+        res.json({ message: 'Order line and associated shops updated successfully' });
     } catch (err) {
         console.error('Error updating order line:', err);
         if (err.code === 'ER_DUP_ENTRY') {
@@ -129,13 +177,41 @@ exports.updateOrderLine = async (req, res) => {
 exports.deleteOrderLine = async (req, res) => {
     const { id } = req.params;
     try {
-        // Clean up related requests first
-        await db.query(
-            'UPDATE order_line_requests SET status = "Cancelled" WHERE order_line_id = ? AND status = "Pending"',
-            [id]
-        );
-        await db.query('DELETE FROM order_lines WHERE id = ?', [id]);
-        res.json({ message: 'Order line deleted successfully' });
+        const connection = await db.getConnection();
+        try {
+            await connection.beginTransaction();
+            
+            // Clean up related requests first
+            await connection.query(
+                'UPDATE order_line_requests SET status = "Cancelled" WHERE order_line_id = ? AND status = "Pending"',
+                [id]
+            );
+            
+            // 1. Delete transactions for all shops in this village
+            await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
+            
+            // 2. Delete bills for all shops in this village
+            await connection.query(`
+                DELETE FROM bills 
+                WHERE (shop_name, village_name) IN (
+                    SELECT shop_name, village_name FROM shops WHERE order_line_id = ?
+                )
+            `, [id]);
+
+            // 3. Delete the shops
+            await connection.query('DELETE FROM shops WHERE order_line_id = ?', [id]);
+            
+            // 4. Delete the order line itself
+            await connection.query('DELETE FROM order_lines WHERE id = ?', [id]);
+            
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+        res.json({ message: 'Order line and associated shops deleted successfully' });
     } catch (err) {
         console.error('Error deleting order line:', err);
         res.status(500).json({ error: 'Failed to delete order line' });

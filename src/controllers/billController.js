@@ -223,6 +223,7 @@ exports.deleteBill = async (req, res) => {
                 type: 'Cancellation',
                 amount: -amount,
                 description: `Cancelled Invoice #${bill.invoice_no}`,
+                balance_before: parseFloat(shop.balance),
                 balance_after: newBalance,
                 created_by: 'Admin'
             });
@@ -281,6 +282,7 @@ exports.updateBill = async (req, res) => {
                     type: 'Adjustment',
                     amount: diff,
                     description: `Update Invoice #${bill.invoice_no}`,
+                    balance_before: parseFloat(shop.balance),
                     balance_after: newBalance,
                     created_by: 'Admin'
                 });

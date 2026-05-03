@@ -84,10 +84,43 @@ const updateShop = async (req, res) => {
     const { id } = req.params;
     const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
     try {
+        // Fetch current shop to check for balance changes
+        const [oldShops] = await db.query('SELECT balance FROM shops WHERE id = ?', [id]);
+        if (oldShops.length === 0) return res.status(404).json({ error: 'Shop not found' });
+        
+        const oldBalance = parseFloat(oldShops[0].balance) || 0;
+        const newBalance = parseFloat(balance) || 0;
+
         await db.query(
             `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, balance = ? WHERE id = ?`,
-            [shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', balance || 0, id]
+            [shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', newBalance, id]
         );
+
+        // If balance was changed manually in the edit modal, log it to the ledger/webhook
+        if (oldBalance !== newBalance) {
+            const diff = newBalance - oldBalance;
+            
+            // Create a local transaction record
+            const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            await db.query(
+                'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [id, 'Adjustment', diff, 'Manual Balance Update (Edit Shop)', newBalance, 'Admin', mysqlDate]
+            );
+
+            // Push to Webhook
+            webhookService.sendTransactionToWebhook({
+                shop_id: id,
+                shop_name: shop_name,
+                village_name: village_name || '',
+                type: 'Adjustment',
+                amount: diff,
+                description: 'Manual Balance Update (Edit Shop)',
+                balance_before: oldBalance,
+                balance_after: newBalance,
+                created_by: 'Admin'
+            });
+        }
+
         res.json({ message: 'Shop updated successfully' });
     } catch (err) {
         console.error('updateShop error:', err);
@@ -98,28 +131,50 @@ const updateShop = async (req, res) => {
 // DELETE a shop
 const deleteShop = async (req, res) => {
     const { id } = req.params;
+    const connection = await db.getConnection();
     try {
-        // Fetch details before deletion for the log
-        const [shops] = await db.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ?', [id]);
-        if (shops.length > 0) {
-            const shop = shops[0];
-            // Log deletion to Webhook
-            webhookService.sendTransactionToWebhook({
-                shop_id: id,
-                shop_name: shop.shop_name,
-                village_name: shop.village_name,
-                type: 'Deletion',
-                amount: 0,
-                description: 'Shop Deleted / Account Closed',
-                balance_after: 0,
-                created_by: 'Admin'
-            });
+        await connection.beginTransaction();
+
+        // 1. Fetch details before deletion for the log
+        const [shops] = await connection.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        if (shops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
         }
-        await db.query(`DELETE FROM shops WHERE id = ?`, [id]);
-        res.json({ message: 'Shop deleted successfully' });
+        
+        const shop = shops[0];
+
+        // 2. Log deletion to Webhook (Background)
+        webhookService.sendTransactionToWebhook({
+            shop_id: id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            type: 'Deletion',
+            amount: 0,
+            description: 'Shop Deleted / Account Closed',
+            balance_before: parseFloat(shop.balance),
+            balance_after: 0,
+            created_by: 'Admin'
+        });
+
+        // 3. Delete related records to prevent orphans
+        // Delete transactions
+        await connection.query('DELETE FROM shop_transactions WHERE shop_id = ?', [id]);
+        
+        // Delete bills (matching by shop name and village since bills don't use shop_id as FK)
+        await connection.query('DELETE FROM bills WHERE shop_name = ? AND village_name = ?', [shop.shop_name, shop.village_name]);
+
+        // 4. Finally delete the shop
+        await connection.query('DELETE FROM shops WHERE id = ?', [id]);
+
+        await connection.commit();
+        res.json({ message: 'Shop and all associated records deleted successfully' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('deleteShop error:', err);
-        res.status(500).json({ error: 'Failed to delete shop' });
+        res.status(500).json({ error: 'Failed to delete shop completely' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 

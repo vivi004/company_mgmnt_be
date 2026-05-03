@@ -195,7 +195,7 @@ exports.deleteBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get bill details
-        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no FROM bills WHERE id = ?', [id]);
+        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by FROM bills WHERE id = ?', [id]);
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
@@ -212,7 +212,7 @@ exports.deleteBill = async (req, res) => {
             // 4. Create "Cancellation" Ledger Entry
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, 'Admin']
+                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, bill.created_by || 'Admin']
             );
 
             // 5. Push to Webhook
@@ -225,7 +225,7 @@ exports.deleteBill = async (req, res) => {
                 description: `Cancelled Invoice #${bill.invoice_no}`,
                 balance_before: parseFloat(shop.balance),
                 balance_after: newBalance,
-                created_by: 'Admin'
+                created_by: bill.created_by || 'Admin'
             });
         }
 
@@ -251,7 +251,7 @@ exports.updateBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get old bill details
-        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no FROM bills WHERE id = ? FOR UPDATE', [id]);
+        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by FROM bills WHERE id = ? FOR UPDATE', [id]);
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
@@ -271,7 +271,7 @@ exports.updateBill = async (req, res) => {
                 // 4. Create Ledger Entry for adjustment
                 await connection.query(
                     'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, 'Admin']
+                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, bill.created_by || 'Admin']
                 );
 
                 // 5. Push to Webhook
@@ -284,7 +284,7 @@ exports.updateBill = async (req, res) => {
                     description: `Update Invoice #${bill.invoice_no}`,
                     balance_before: parseFloat(shop.balance),
                     balance_after: newBalance,
-                    created_by: 'Admin'
+                    created_by: bill.created_by || 'Admin'
                 });
             }
         }

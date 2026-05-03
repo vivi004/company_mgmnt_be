@@ -26,6 +26,7 @@ const shopRoutes = require('./routes/shopRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
 const billRoutes = require('./routes/billRoutes');
+const productRoutes = require('./routes/productRoutes');
 
 app.use('/api/employees', employeeRoutes);
 app.use('/api/auth', authRoutes);
@@ -35,6 +36,7 @@ app.use('/api/shops', shopRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/bills', billRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/products', productRoutes);
 
 
 app.get('/api/health', (req, res) => {

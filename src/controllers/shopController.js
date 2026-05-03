@@ -48,8 +48,20 @@ const createShop = async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
+    let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by } = req.body;
     try {
+        // Safety check: If created_by is missing, fetch the acting user's name from the DB
+        if (!created_by && req.user && req.user.id) {
+            try {
+                const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+                if (users.length > 0) {
+                    created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+                }
+            } catch (e) {
+                console.error('Failed to fetch user name for shop creation:', e);
+            }
+        }
+
         const startBalance = parseFloat(balance) || 0;
         const [result] = await db.query(
             `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -66,7 +78,7 @@ const createShop = async (req, res) => {
             description: 'Shop Registered (Opening Balance)',
             balance_before: 0,
             balance_after: startBalance,
-            created_by: 'System'
+            created_by: created_by || 'System'
         });
 
         res.status(201).json({ id: result.insertId, message: 'Shop created successfully' });
@@ -146,6 +158,16 @@ const deleteShop = async (req, res) => {
         const shop = shops[0];
 
         // 2. Log deletion to Webhook (Background)
+        let actingUserName = 'Admin';
+        try {
+            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                actingUserName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            }
+        } catch (e) {
+            console.error('Failed to fetch user name for shop deletion:', e);
+        }
+
         webhookService.sendTransactionToWebhook({
             shop_id: id,
             shop_name: shop.shop_name,
@@ -155,7 +177,7 @@ const deleteShop = async (req, res) => {
             description: 'Shop Deleted / Account Closed',
             balance_before: parseFloat(shop.balance),
             balance_after: 0,
-            created_by: 'Admin'
+            created_by: actingUserName
         });
 
         // 3. Delete related records to prevent orphans

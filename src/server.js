@@ -58,7 +58,23 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception thrown:', err.stack);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`Server is running on port ${PORT}`);
+    
+    // Auto-initialize database tables if they don't exist
+    try {
+        const db = require('./config/db');
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS product_rates (
+                product_id VARCHAR(50) PRIMARY KEY,
+                rate DECIMAL(10, 2) NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('Database tables verified/initialized.');
+    } catch (err) {
+        console.error('Database initialization warning:', err.message);
+    }
+    
     console.log('Press Ctrl+C to stop');
 });

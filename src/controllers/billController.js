@@ -137,7 +137,7 @@ exports.getAllBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
             WHERE b.status = "Verified" 
             GROUP BY b.id
-            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC
+            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
         const mapped = rows.map(row => {
             let cart = row.cart;
@@ -161,7 +161,7 @@ exports.getUnverifiedBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
             WHERE b.status = "Unverified" 
             GROUP BY b.id
-            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC
+            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
         const mapped = rows.map(row => {
             let cart = row.cart;

@@ -267,7 +267,7 @@ const getShopLedger = async (req, res) => {
     const skip = parseInt(req.query.skip) || 0;
     try {
         const [transactions] = await db.query(
-            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY transaction_date DESC, id DESC LIMIT ? OFFSET ?',
+            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY id DESC LIMIT ? OFFSET ?',
             [id, limit, skip]
         );
         res.json(transactions);

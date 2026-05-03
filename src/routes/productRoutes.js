@@ -7,6 +7,6 @@ const authMiddleware = require('../middleware/authMiddleware');
 router.get('/rates', authMiddleware, productController.getProductRates);
 
 // Only Admin can sync rates from Google Sheets
-router.post('/sync', authMiddleware, authMiddleware.authorizeRole('Admin'), productController.syncProductRates);
+router.post('/sync', authMiddleware, authMiddleware.authorizeRole('admin'), productController.syncProductRates);
 
 module.exports = router;

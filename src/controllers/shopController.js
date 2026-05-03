@@ -99,12 +99,13 @@ const updateShop = async (req, res) => {
         // If balance was changed manually in the edit modal, log it to the ledger/webhook
         if (oldBalance !== newBalance) {
             const diff = newBalance - oldBalance;
+            const { created_by } = req.body;
             
             // Create a local transaction record
             const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
             await db.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [id, 'Adjustment', diff, 'Manual Balance Update (Edit Shop)', newBalance, 'Admin', mysqlDate]
+                [id, 'Adjustment', diff, 'Manual Balance Update (Edit Shop)', newBalance, created_by || 'Admin', mysqlDate]
             );
 
             // Push to Webhook
@@ -117,7 +118,7 @@ const updateShop = async (req, res) => {
                 description: 'Manual Balance Update (Edit Shop)',
                 balance_before: oldBalance,
                 balance_after: newBalance,
-                created_by: 'Admin'
+                created_by: created_by || 'Admin'
             });
         }
 
@@ -215,7 +216,19 @@ const syncAllShopsToLedger = async (req, res) => {
 // POST Collect Payment
 const collectPayment = async (req, res) => {
     const { id } = req.params;
-    const { amount, payment_method, description, created_by } = req.body;
+    let { amount, payment_method, description, created_by } = req.body;
+
+    // Safety check: If created_by is missing, fetch the acting user's name from the DB
+    if (!created_by && req.user && req.user.id) {
+        try {
+            const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            }
+        } catch (e) {
+            console.error('Failed to fetch user name for payment collection:', e);
+        }
+    }
 
     const connection = await db.getConnection();
     try {
@@ -279,7 +292,19 @@ const getShopLedger = async (req, res) => {
 // POST Adjust Balance (Admin only)
 const adjustBalance = async (req, res) => {
     const { id } = req.params;
-    const { amount, type, description, created_by } = req.body; // type: 'Adjustment'
+    let { amount, type, description, created_by } = req.body; // type: 'Adjustment'
+
+    // Safety check: If created_by is missing, fetch the acting user's name from the DB
+    if (!created_by && req.user && req.user.id) {
+        try {
+            const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            }
+        } catch (e) {
+            console.error('Failed to fetch user name for balance adjustment:', e);
+        }
+    }
 
     const connection = await db.getConnection();
     try {

@@ -2,7 +2,19 @@ const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    const { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
+    let { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
+    
+    // Safety check: If created_by is missing, fetch the acting user's name from the DB
+    if (!created_by && req.user && req.user.id) {
+        try {
+            const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            }
+        } catch (e) {
+            console.error('Failed to fetch user name for bill creation:', e);
+        }
+    }
 
     if (!shop_name || !village_name || !cart) {
         return res.status(400).json({
@@ -199,6 +211,11 @@ exports.deleteBill = async (req, res) => {
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
+        // 1b. Get the current user's name for the ledger
+        const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+        const currentUser = users[0];
+        const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (bill.created_by || 'Admin');
+
         // 2. Get shop details
         const [shops] = await connection.query('SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE', [bill.shop_name, bill.village_name]);
         if (shops.length > 0) {
@@ -212,7 +229,7 @@ exports.deleteBill = async (req, res) => {
             // 4. Create "Cancellation" Ledger Entry
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, bill.created_by || 'Admin']
+                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName]
             );
 
             // 5. Push to Webhook
@@ -225,7 +242,7 @@ exports.deleteBill = async (req, res) => {
                 description: `Cancelled Invoice #${bill.invoice_no}`,
                 balance_before: parseFloat(shop.balance),
                 balance_after: newBalance,
-                created_by: bill.created_by || 'Admin'
+                created_by: actingUserName
             });
         }
 
@@ -255,6 +272,11 @@ exports.updateBill = async (req, res) => {
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
+        // 1b. Get current user's name for the ledger
+        const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+        const currentUser = users[0];
+        const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (req.body.created_by || bill.created_by || 'Admin');
+
         // 2. Calculate difference
         const oldAmount = parseFloat(bill.total_amount);
         const newAmount = parseFloat(total_amount);
@@ -271,7 +293,7 @@ exports.updateBill = async (req, res) => {
                 // 4. Create Ledger Entry for adjustment
                 await connection.query(
                     'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, bill.created_by || 'Admin']
+                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, actingUserName]
                 );
 
                 // 5. Push to Webhook
@@ -284,7 +306,7 @@ exports.updateBill = async (req, res) => {
                     description: `Update Invoice #${bill.invoice_no}`,
                     balance_before: parseFloat(shop.balance),
                     balance_after: newBalance,
-                    created_by: bill.created_by || 'Admin'
+                    created_by: actingUserName
                 });
             }
         }

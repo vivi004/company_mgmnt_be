@@ -111,8 +111,20 @@ const updateShop = async (req, res) => {
         // If balance was changed manually in the edit modal, log it to the ledger/webhook
         if (oldBalance !== newBalance) {
             const diff = newBalance - oldBalance;
-            const { created_by } = req.body;
+            let { created_by } = req.body;
             
+            // Safety check: If created_by is missing, fetch the acting user's name from the DB
+            if (!created_by && req.user && req.user.id) {
+                try {
+                    const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+                    if (users.length > 0) {
+                        created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch user name for shop update adjustment:', e);
+                }
+            }
+
             // Create a local transaction record
             const mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
             await db.query(

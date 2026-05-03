@@ -84,7 +84,7 @@ exports.createBill = async (req, res) => {
 
         const [billResult] = await connection.query(
             'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Mobile App', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount]
+            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount]
         );
 
         // 6. Update Shop Balance
@@ -97,7 +97,7 @@ exports.createBill = async (req, res) => {
         // 7. Create Shop Transaction (Ledger Entry)
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Mobile App', mysqlDeliveryDate || mysqlDate]
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate]
         );
 
         // 8. Increment the next invoice number
@@ -118,7 +118,7 @@ exports.createBill = async (req, res) => {
             description: `Invoice #${assignedInvoiceNo}`,
             balance_before: shop.balance,
             balance_after: newBalance,
-            created_by: created_by || 'Mobile App',
+            created_by: created_by || 'Staff',
             reference_id: billResult.insertId
         });
 

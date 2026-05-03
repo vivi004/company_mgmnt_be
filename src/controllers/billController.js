@@ -2,8 +2,12 @@ const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    let { shop_name, village_name, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
+    let { shop_name, village_name, phone, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
     
+    // Trim names to prevent lookup errors
+    shop_name = shop_name?.trim();
+    village_name = village_name?.trim();
+
     // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
         try {
@@ -28,15 +32,55 @@ exports.createBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get the shop ID and current balance
-        const [shops] = await connection.query(
+        let [shops] = await connection.query(
             'SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE',
             [shop_name, village_name]
         );
 
+        let shop;
         if (shops.length === 0) {
-            throw new Error(`Shop "${shop_name}" in "${village_name}" not found.`);
+            // AUTO-CREATE SHOP for "Temporary" / New Shop billing
+            console.log(`Shop "${shop_name}" not found. Auto-creating for temporary billing...`);
+            
+            // First, find or create the village (order_line)
+            let [orderLines] = await connection.query('SELECT id FROM order_lines WHERE name = ?', [village_name]);
+            let orderLineId;
+            
+            if (orderLines.length > 0) {
+                orderLineId = orderLines[0].id;
+            } else {
+                // Create new village if it doesn't exist
+                const nodeId = `TEMP-${Date.now()}`;
+                const [olResult] = await connection.query(
+                    'INSERT INTO order_lines (name, node_id) VALUES (?, ?)',
+                    [village_name, nodeId]
+                );
+                orderLineId = olResult.insertId;
+            }
+
+            // Create the new shop
+            const [shopResult] = await connection.query(
+                'INSERT INTO shops (order_line_id, shop_name, village_name, phone, balance) VALUES (?, ?, ?, ?, ?)',
+                [orderLineId, shop_name, village_name, phone || '', 0]
+            );
+            
+            shop = { id: shopResult.insertId, balance: 0 };
+
+            // Log new shop creation to ledger webhook
+            webhookService.sendTransactionToWebhook({
+                shop_id: shop.id,
+                shop_name: shop_name,
+                village_name: village_name,
+                type: 'Registration',
+                amount: 0,
+                description: 'Auto-created via Manual Bill Generation',
+                balance_before: 0,
+                balance_after: 0,
+                created_by: created_by || 'Admin'
+            });
+        } else {
+            shop = shops[0];
         }
-        const shop = shops[0];
 
         // 2. Ensure app_settings exists
         await connection.query(`
@@ -66,7 +110,7 @@ exports.createBill = async (req, res) => {
         } catch (e) {
             mysqlDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
-        
+
         let mysqlDeliveryDate = null;
         if (delivery_date) {
             try {
@@ -74,7 +118,7 @@ exports.createBill = async (req, res) => {
                 if (!isNaN(d.getTime())) {
                     mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
                 }
-            } catch(e) {}
+            } catch (e) { }
         }
 
         // 5. Insert the bill
@@ -268,7 +312,7 @@ exports.updateBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get old bill details
-        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by FROM bills WHERE id = ? FOR UPDATE', [id]);
+        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by, delivery_date FROM bills WHERE id = ? FOR UPDATE', [id]);
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
@@ -279,7 +323,7 @@ exports.updateBill = async (req, res) => {
 
         // 2. Calculate difference
         const oldAmount = parseFloat(bill.total_amount);
-        const newAmount = parseFloat(total_amount);
+        const newAmount = total_amount !== undefined ? parseFloat(total_amount) : oldAmount;
         const diff = newAmount - oldAmount;
 
         // 3. Update shop balance if there's a difference
@@ -312,19 +356,19 @@ exports.updateBill = async (req, res) => {
         }
 
         // 6. Update the bill
-        let mysqlDeliveryDate = null;
+        let mysqlDeliveryDate = bill.delivery_date ? new Date(bill.delivery_date).toISOString().slice(0, 19).replace('T', ' ') : null;
         if (req.body.delivery_date) {
             try {
                 const d = new Date(req.body.delivery_date);
                 if (!isNaN(d.getTime())) {
                     mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
                 }
-            } catch(e) {}
+            } catch (e) { }
         }
 
         await connection.query(
             'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ? WHERE id = ?',
-            [JSON.stringify(cart), JSON.stringify(custom_rates || {}), newAmount, mysqlDeliveryDate, id]
+            [JSON.stringify(cart || bill.cart), JSON.stringify(custom_rates || bill.custom_rates || {}), newAmount, mysqlDeliveryDate, id]
         );
 
         // 7. Update transaction date in ledger if it exists for this bill

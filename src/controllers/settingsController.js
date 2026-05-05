@@ -8,15 +8,17 @@ const ensureSettings = async () => {
             next_invoice_no INT NOT NULL DEFAULT 1001,
             last_invoice_no INT NOT NULL DEFAULT 1000,
             ledger_sheet_url TEXT,
+            revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
     `);
-    // Safely add column if it doesn't exist
+    // Safely add columns if they don't exist
     try {
         await db.query('ALTER TABLE app_settings ADD COLUMN ledger_sheet_url TEXT');
-    } catch (e) {
-        // Ignore error if column already exists
-    }
+    } catch (e) {}
+    try {
+        await db.query("ALTER TABLE app_settings ADD COLUMN revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00'");
+    } catch (e) {}
     // Insert default row if not present
     await db.query(`
         INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)
@@ -146,5 +148,17 @@ exports.deleteMotorVehicle = async (req, res) => {
     } catch (err) {
         console.error('Error deleting motor vehicle:', err);
         res.status(500).json({ error: 'Failed to delete motor vehicle' });
+    }
+};
+// POST /api/settings/logout-all
+exports.logoutAllStaff = async (req, res) => {
+    try {
+        await ensureSettings();
+        // Set revoked_at to current timestamp
+        await db.query('UPDATE app_settings SET revoked_at = CURRENT_TIMESTAMP WHERE id = 1');
+        res.json({ message: 'All staff sessions have been revoked' });
+    } catch (err) {
+        console.error('Error in logoutAllStaff:', err);
+        res.status(500).json({ error: 'Failed to revoke staff sessions' });
     }
 };

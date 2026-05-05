@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
+const db = require('../config/db');
 
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Unauthorized: No token provided' });
@@ -9,6 +10,25 @@ const authMiddleware = (req, res, next) => {
     const token = authHeader.split(' ')[1];
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
+        // Session Revocation Check for Staff
+        if (decoded.role === 'staff') {
+            try {
+                const [rows] = await db.query('SELECT revoked_at FROM app_settings WHERE id = 1');
+                if (rows && rows[0]) {
+                    const revokedAt = new Date(rows[0].revoked_at).getTime();
+                    const issuedAt = (decoded.iat || 0) * 1000;
+                    
+                    if (issuedAt < revokedAt) {
+                        return res.status(401).json({ error: 'Your session has been revoked by admin. Please login again.' });
+                    }
+                }
+            } catch (dbErr) {
+                console.error('Revocation check error:', dbErr);
+                // Continue if DB fails, rather than locking everyone out
+            }
+        }
+
         req.user = decoded; // { id, role, iat, exp }
         next();
     } catch (err) {

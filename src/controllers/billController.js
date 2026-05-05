@@ -191,9 +191,9 @@ exports.getAllBills = async (req, res) => {
     try {
         // Primary ledger = only verified bills
         const [rows] = await db.query(`
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
             FROM bills b 
-            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
             WHERE b.status = "Verified" 
             GROUP BY b.id
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
@@ -215,9 +215,9 @@ exports.getAllBills = async (req, res) => {
 exports.getUnverifiedBills = async (req, res) => {
     try {
         const [rows] = await db.query(`
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
             FROM bills b 
-            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
             WHERE b.status = "Unverified" 
             GROUP BY b.id
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
@@ -413,9 +413,9 @@ exports.getBillsByDateRange = async (req, res) => {
     const { startDate, endDate } = req.query;
     try {
         let query = `
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2 
+            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
             FROM bills b 
-            LEFT JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name 
+            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
             WHERE b.status = "Verified"
         `;
         const params = [];

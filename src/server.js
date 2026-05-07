@@ -71,6 +71,30 @@ app.listen(PORT, async () => {
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
+
+        // Ensure app_settings exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INT PRIMARY KEY DEFAULT 1,
+                next_invoice_no INT NOT NULL DEFAULT 1001,
+                last_invoice_no INT NOT NULL DEFAULT 1000,
+                ledger_sheet_url TEXT,
+                revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Insert default row if not present
+        await db.query(`
+            INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no)
+            VALUES (1, 1001, 1000)
+        `);
+
+        // Ensure is_edited_price column exists in bills
+        try {
+            await db.query('ALTER TABLE bills ADD COLUMN is_edited_price BOOLEAN DEFAULT FALSE');
+        } catch (e) {}
+
         console.log('Database tables verified/initialized.');
     } catch (err) {
         console.error('Database initialization warning:', err.message);

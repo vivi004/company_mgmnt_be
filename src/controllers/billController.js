@@ -82,31 +82,20 @@ exports.createBill = async (req, res) => {
             shop = shops[0];
         }
 
-        // 2. Ensure app_settings exists
-        await connection.query(`
-            CREATE TABLE IF NOT EXISTS app_settings (
-                id INT PRIMARY KEY,
-                next_invoice_no INT NOT NULL DEFAULT 1001,
-                last_invoice_no INT NOT NULL DEFAULT 1000,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-        `);
-
-        await connection.query(`
-            INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no)
-            VALUES (1, 1001, 1000)
-        `);
-
-        // Ensure is_edited_price column exists
-        try {
-            await connection.query('ALTER TABLE bills ADD COLUMN is_edited_price BOOLEAN DEFAULT FALSE');
-        } catch (e) {
-            // Ignore error if column already exists (Error 1060)
-        }
+        // 2. Start Transaction
+        await connection.beginTransaction();
 
         // 3. Get and Lock the next invoice number
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
-        let assignedInvoiceNo = rows[0]?.next_invoice_no || 1001;
+        
+        if (rows.length === 0) {
+            // This should not happen if initialized correctly, but as a fallback:
+            await connection.query('INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no) VALUES (1, 1001, 1000)');
+            var [fallbackRows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
+            var assignedInvoiceNo = fallbackRows[0]?.next_invoice_no || 1001;
+        } else {
+            var assignedInvoiceNo = rows[0].next_invoice_no;
+        }
 
         // 4. Prepare the date
         let mysqlDate;

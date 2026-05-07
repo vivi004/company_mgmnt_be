@@ -2,7 +2,7 @@ const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    let { shop_name, village_name, phone, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date } = req.body;
+    let { shop_name, village_name, phone, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
     
     // Trim names to prevent lookup errors
     shop_name = shop_name?.trim();
@@ -97,6 +97,13 @@ exports.createBill = async (req, res) => {
             VALUES (1, 1001, 1000)
         `);
 
+        // Ensure is_edited_price column exists
+        try {
+            await connection.query('ALTER TABLE bills ADD COLUMN is_edited_price BOOLEAN DEFAULT FALSE');
+        } catch (e) {
+            // Ignore error if column already exists (Error 1060)
+        }
+
         // 3. Get and Lock the next invoice number
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
         let assignedInvoiceNo = rows[0]?.next_invoice_no || 1001;
@@ -130,8 +137,8 @@ exports.createBill = async (req, res) => {
         const amount = parseFloat(total_amount) || 0;
 
         const [billResult] = await connection.query(
-            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount]
+            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0]
         );
 
         // 6. Update Shop Balance
@@ -312,7 +319,7 @@ exports.deleteBill = async (req, res) => {
 
 exports.updateBill = async (req, res) => {
     const { id } = req.params;
-    const { cart, custom_rates, total_amount } = req.body;
+    const { cart, custom_rates, total_amount, is_edited_price } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -380,12 +387,13 @@ exports.updateBill = async (req, res) => {
         }
 
         await connection.query(
-            'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ? WHERE id = ?',
+            'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ?, is_edited_price = ? WHERE id = ?',
             [
                 JSON.stringify(cart !== undefined ? cart : bill.cart), 
                 JSON.stringify(custom_rates !== undefined ? custom_rates : bill.custom_rates), 
                 newAmount, 
                 mysqlDeliveryDate, 
+                is_edited_price !== undefined ? (is_edited_price ? 1 : 0) : bill.is_edited_price,
                 id
             ]
         );

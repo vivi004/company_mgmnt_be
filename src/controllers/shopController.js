@@ -134,8 +134,7 @@ const updateShop = async (req, res) => {
                 }
             }
 
-            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-            const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
+            const mysqlDate = new Date();
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 [id, 'Adjustment', newBalance - oldBalance, 'Manual Balance Update (Edit Shop)', newBalance, actingUserName, mysqlDate]
@@ -244,7 +243,7 @@ const syncAllShopsToLedger = async (req, res) => {
                 balance_after: parseFloat(shop.balance),
                 created_by: 'Admin Sync',
                 payment_method: 'Opening Balance',
-                timestamp: new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace('T', ' ').split('.')[0]
+                timestamp: new Date()
             }));
 
             // Send this batch
@@ -289,8 +288,7 @@ const collectPayment = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
-        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-        const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
+        const mysqlDate = new Date();
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
@@ -366,8 +364,7 @@ const adjustBalance = async (req, res) => {
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
-        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-        const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
+        const mysqlDate = new Date();
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]

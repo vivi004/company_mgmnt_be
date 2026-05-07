@@ -108,27 +108,23 @@ exports.createBill = async (req, res) => {
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
         let assignedInvoiceNo = rows[0]?.next_invoice_no || 1001;
 
-        // 4. Prepare the date in IST
+        // 4. Prepare the date
         let mysqlDate;
         try {
-            const d = bill_date ? new Date(bill_date) : new Date();
-            if (isNaN(d.getTime())) throw new Error('Invalid date');
-            // Add IST offset (+5.5 hours) for MySQL storage
-            const istDate = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
-            mysqlDate = istDate.toISOString().slice(0, 19).replace('T', ' ');
+            mysqlDate = bill_date ? new Date(bill_date) : new Date();
+            if (isNaN(mysqlDate.getTime())) throw new Error('Invalid date');
         } catch (e) {
-            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-            mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' ');
+            mysqlDate = new Date();
         }
 
         let mysqlDeliveryDate = null;
         if (delivery_date) {
             try {
-                const d = new Date(delivery_date);
-                if (!isNaN(d.getTime())) {
-                    mysqlDeliveryDate = d.toISOString().slice(0, 19).replace('T', ' ');
-                }
-            } catch (e) { }
+                mysqlDeliveryDate = new Date(delivery_date);
+                if (isNaN(mysqlDeliveryDate.getTime())) mysqlDeliveryDate = null;
+            } catch (e) { 
+                mysqlDeliveryDate = null;
+            }
         }
 
         // 5. Insert the bill

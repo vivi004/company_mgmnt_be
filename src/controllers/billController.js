@@ -122,8 +122,8 @@ exports.createBill = async (req, res) => {
         const amount = parseFloat(total_amount) || 0;
 
         const [billResult] = await connection.query(
-            'INSERT INTO bills (invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0]
+            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0]
         );
 
         // 6. Update Shop Balance

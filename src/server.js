@@ -90,10 +90,29 @@ app.listen(PORT, async () => {
             VALUES (1, 1001, 1000)
         `);
 
-        // Ensure is_edited_price column exists in bills
+        // Ensure bills table has shop_id for robust consistency
         try {
-            await db.query('ALTER TABLE bills ADD COLUMN is_edited_price BOOLEAN DEFAULT FALSE');
+            await db.query('ALTER TABLE bills ADD COLUMN shop_id INT AFTER id');
+            console.log('shop_id column added to bills.');
+            
+            // Migration: Populate shop_id based on current shop_name/village_name matches
+            await db.query(`
+                UPDATE bills b
+                JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name
+                SET b.shop_id = s.id
+                WHERE b.shop_id IS NULL
+            `);
+            console.log('Existing bills migrated to use shop_id.');
         } catch (e) {}
+
+        // Data Cleanup: Merge "PTATHAP K" (typo) into "PRADAP K"
+        try {
+            await db.query("UPDATE bills SET created_by = 'PRADAP K' WHERE created_by = 'PTATHAP K'");
+            await db.query("UPDATE shop_transactions SET created_by = 'PRADAP K' WHERE created_by = 'PTATHAP K'");
+            console.log('Legacy name records merged (PTATHAP -> PRADAP).');
+        } catch (e) {
+            console.error('Data cleanup warning:', e.message);
+        }
 
         console.log('Database tables verified/initialized.');
     } catch (err) {

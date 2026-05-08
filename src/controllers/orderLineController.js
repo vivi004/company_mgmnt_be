@@ -90,13 +90,8 @@ exports.approveDeleteRequest = async (req, res) => {
             // 1. Delete transactions for all shops in this village
             await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
             
-            // 2. Delete bills for all shops in this village (matched by name/village)
-            await connection.query(`
-                DELETE FROM bills 
-                WHERE (shop_name, village_name) IN (
-                    SELECT shop_name, village_name FROM shops WHERE order_line_id = ?
-                )
-            `, [request.order_line_id]);
+            // 2. Delete bills for all shops in this village (Now using precise shop IDs)
+            await connection.query('DELETE FROM bills WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
 
             // 3. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [request.order_line_id]);
@@ -145,24 +140,37 @@ exports.updateOrderLine = async (req, res) => {
         try {
             await connection.beginTransaction();
             
-            // 1. Update the order line
+            // 1. Get the current name before update to handle cascading changes
+            const [oldRows] = await connection.query('SELECT name FROM order_lines WHERE id = ?', [id]);
+            const oldName = oldRows.length > 0 ? oldRows[0].name : null;
+
+            // 2. Update the order line
             await connection.query(
                 'UPDATE order_lines SET name = ?, node_id = ? WHERE id = ?',
                 [name, node_id, id]
             );
             
-            // 2. Sync the village_name in the shops table for consistency
+            // 3. Sync the village_name in the shops table for consistency
             await connection.query(
                 'UPDATE shops SET village_name = ? WHERE order_line_id = ?',
                 [name, id]
             );
+
+            // 4. Cascade the change to the bills table so history remains linked
+            // Since bills are linked by shop_id, we update village_name for all shops in this village
+            if (oldName && oldName !== name) {
+                await connection.query(
+                    'UPDATE bills SET village_name = ? WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)',
+                    [name, id]
+                );
+            }
             
             await connection.commit();
         } catch (err) {
-            await connection.rollback();
+            if (connection) await connection.rollback();
             throw err;
         } finally {
-            connection.release();
+            if (connection) connection.release();
         }
         res.json({ message: 'Order line and associated shops updated successfully' });
     } catch (err) {
@@ -191,12 +199,7 @@ exports.deleteOrderLine = async (req, res) => {
             await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
             
             // 2. Delete bills for all shops in this village
-            await connection.query(`
-                DELETE FROM bills 
-                WHERE (shop_name, village_name) IN (
-                    SELECT shop_name, village_name FROM shops WHERE order_line_id = ?
-                )
-            `, [id]);
+            await connection.query('DELETE FROM bills WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
 
             // 3. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [id]);

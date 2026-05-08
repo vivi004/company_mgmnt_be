@@ -37,10 +37,26 @@ exports.approveProfileRequest = async (req, res) => {
         if (requests.length === 0) return res.status(404).json({ error: 'Request not found' });
 
         const request = requests[0];
+        
+        // Fetch current employee name before updating for cascading changes
+        const [oldEmps] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [request.employee_id]);
+        let oldName = null;
+        if (oldEmps.length > 0) {
+            oldName = `${oldEmps[0].first_name} ${oldEmps[0].last_name || ''}`.trim();
+        }
+        const newName = `${request.first_name} ${request.last_name || ''}`.trim();
+
         await db.query(
             'UPDATE employees SET first_name = ?, last_name = ?, email = ? WHERE id = ?',
             [request.first_name, request.last_name, request.email, request.employee_id]
         );
+
+        // Cascade the name change to historical records
+        if (oldName && oldName !== newName) {
+            await db.query('UPDATE bills SET created_by = ? WHERE created_by = ?', [newName, oldName]);
+            await db.query('UPDATE shop_transactions SET created_by = ? WHERE created_by = ?', [newName, oldName]);
+        }
+
         await db.query('UPDATE profile_requests SET status = "Approved" WHERE id = ?', [id]);
         res.json({ message: 'Request approved and profile updated!' });
     } catch (err) {

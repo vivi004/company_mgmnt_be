@@ -117,10 +117,11 @@ const updateShop = async (req, res) => {
         );
 
         // 2. If name or village changed, update ALL related bills to prevent orphans
+        // We now have shop_id, so we update by ID which is 100% reliable
         if (oldShop.shop_name !== shop_name || oldShop.village_name !== village_name) {
             await connection.query(
-                'UPDATE bills SET shop_name = ?, village_name = ? WHERE shop_name = ? AND village_name = ?',
-                [shop_name, village_name || '', oldShop.shop_name, oldShop.village_name]
+                'UPDATE bills SET shop_name = ?, village_name = ? WHERE shop_id = ?',
+                [shop_name, village_name || '', id]
             );
         }
 
@@ -207,8 +208,8 @@ const deleteShop = async (req, res) => {
         // Delete transactions
         await connection.query('DELETE FROM shop_transactions WHERE shop_id = ?', [id]);
         
-        // Delete bills (matching by shop name and village since bills don't use shop_id as FK)
-        await connection.query('DELETE FROM bills WHERE shop_name = ? AND village_name = ?', [shop.shop_name, shop.village_name]);
+        // Delete bills (Now using shop_id for precise deletion)
+        await connection.query('DELETE FROM bills WHERE shop_id = ?', [id]);
 
         // 4. Finally delete the shop
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);

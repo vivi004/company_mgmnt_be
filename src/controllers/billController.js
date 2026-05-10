@@ -97,20 +97,26 @@ exports.createBill = async (req, res) => {
             var assignedInvoiceNo = rows[0].next_invoice_no;
         }
 
-        // 4. Prepare the date
+        // 4. Prepare the date in strictly IST (Indian Standard Time)
         let mysqlDate;
         try {
-            mysqlDate = bill_date ? new Date(bill_date) : new Date();
-            if (isNaN(mysqlDate.getTime())) throw new Error('Invalid date');
+            const parsed = bill_date ? new Date(bill_date) : new Date();
+            if (isNaN(parsed.getTime())) throw new Error('Invalid date');
+            const istTime = new Date(parsed.getTime() + 5.5 * 60 * 60 * 1000);
+            mysqlDate = istTime.toISOString().slice(0, 19).replace('T', ' ');
         } catch (e) {
-            mysqlDate = new Date();
+            const istTime = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            mysqlDate = istTime.toISOString().slice(0, 19).replace('T', ' ');
         }
 
         let mysqlDeliveryDate = null;
         if (delivery_date) {
             try {
-                mysqlDeliveryDate = new Date(delivery_date);
-                if (isNaN(mysqlDeliveryDate.getTime())) mysqlDeliveryDate = null;
+                const parsedDelivery = new Date(delivery_date);
+                if (!isNaN(parsedDelivery.getTime())) {
+                    const istD = new Date(parsedDelivery.getTime() + 5.5 * 60 * 60 * 1000);
+                    mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
+                }
             } catch (e) { 
                 mysqlDeliveryDate = null;
             }
@@ -136,7 +142,7 @@ exports.createBill = async (req, res) => {
         // 7. Create Shop Transaction (Ledger Entry)
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate]
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Staff', mysqlDate]
         );
 
         // 8. Increment the next invoice number
@@ -383,13 +389,8 @@ exports.updateBill = async (req, res) => {
             ]
         );
 
-        // 7. Update transaction date in ledger if it exists for this bill
-        if (mysqlDeliveryDate) {
-            await connection.query(
-                'UPDATE shop_transactions SET transaction_date = ? WHERE reference_id = ? AND type = "Bill"',
-                [mysqlDeliveryDate, id]
-            );
-        }
+        // 7. Removed updating transaction date in ledger when delivery date changes
+        // The ledger should always reflect the exact time the invoice was generated, not when it is delivered.
 
         await connection.commit();
         res.json({ message: 'Bill updated and balance adjusted successfully' });

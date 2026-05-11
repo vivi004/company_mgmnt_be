@@ -2,16 +2,48 @@ const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 
+/**
+ * AUTO-LAND BILLS: Moves money from future bills to active shop balances 
+ * when the delivery date arrives (midnight).
+ */
+async function autoLandBills(connection) {
+    // 1. Move money to shop balances for bills that have reached their delivery date
+    await connection.query(`
+        UPDATE shops s
+        SET s.balance = s.balance + (
+            SELECT COALESCE(SUM(total_amount), 0)
+            FROM bills b
+            WHERE b.shop_id = s.id 
+            AND b.is_applied_to_balance = 0 
+            AND DATE(b.delivery_date) <= CURDATE()
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM bills b 
+            WHERE b.shop_id = s.id 
+            AND b.is_applied_to_balance = 0 
+            AND DATE(b.delivery_date) <= CURDATE()
+        )
+    `);
+
+    // 2. Mark those bills as 'Applied' so we don't count them again
+    await connection.query(`
+        UPDATE bills SET is_applied_to_balance = 1 
+        WHERE is_applied_to_balance = 0 
+        AND DATE(delivery_date) <= CURDATE()
+    `);
+}
+
 // GET all shops for a specific order_line (village)
 const getShopsByOrderLine = async (req, res) => {
     const { order_line_id } = req.params;
+    const connection = await db.getConnection();
     try {
-        const [shops] = await db.query(
+        await autoLandBills(connection);
+        const [shops] = await connection.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
-                        WHERE b.shop_name = s.shop_name 
-                        AND b.village_name = s.village_name
+                        WHERE b.shop_id = s.id
                         AND DATE(b.created_at) = CURDATE()
                     ) AS UNSIGNED) as has_order_today
              FROM shops s 
@@ -23,13 +55,17 @@ const getShopsByOrderLine = async (req, res) => {
     } catch (err) {
         console.error('getShopsByOrderLine error:', err);
         res.status(500).json({ error: 'Failed to fetch shops' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
 // GET all shops
 const getAllShops = async (req, res) => {
+    const connection = await db.getConnection();
     try {
-        const [shops] = await db.query(
+        await autoLandBills(connection);
+        const [shops] = await connection.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
                     ol.name AS ol_village_name, ol.node_id
              FROM shops s
@@ -40,6 +76,8 @@ const getAllShops = async (req, res) => {
     } catch (err) {
         console.error('getAllShops error:', err);
         res.status(500).json({ error: 'Failed to fetch shops' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
@@ -100,7 +138,7 @@ const updateShop = async (req, res) => {
         await connection.beginTransaction();
 
         // Fetch current shop to check for balance and name changes
-        const [oldShops] = await connection.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [oldShops] = await connection.query('SELECT shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (oldShops.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Shop not found' });
@@ -140,6 +178,27 @@ const updateShop = async (req, res) => {
                 'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 [id, 'Adjustment', newBalance - oldBalance, 'Manual Balance Update (Edit Shop)', newBalance, actingUserName, mysqlDate]
             );
+
+            // Update daily_collections for this manual edit
+            const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+            const todayIST = dateRows[0].today;
+
+            // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
+            const [futureRows] = await connection.query(
+                "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
+                [id, todayIST + ' 23:59:59']
+            );
+            const futureAmount = parseFloat(futureRows[0].future_amount);
+            const dashboardBalance = newBalance - futureAmount;
+
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    total_balance = VALUES(total_balance)
+            `, [id, shop_name, village_name || '', oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
 
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
@@ -280,9 +339,21 @@ const collectPayment = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (shops.length === 0) throw new Error('Shop not found');
         const shop = shops[0];
+
+        // Self-Healing: If order_line_id is missing, try to find it by village name
+        let shopOrderLineId = shop.order_line_id;
+        if (!shopOrderLineId) {
+            const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
+            if (ols.length > 0) {
+                shopOrderLineId = ols[0].id;
+                await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
+                console.log(`Self-healed shop ${id}: Linked to order_line ${shopOrderLineId}`);
+            }
+        }
+        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
 
         const payAmount = parseFloat(amount);
         const newBalance = parseFloat(shop.balance) - payAmount;
@@ -294,6 +365,58 @@ const collectPayment = async (req, res) => {
             'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
         );
+
+        // Update daily_collections for this payment
+        const { cash_amount, upi_amount, cheque_amount } = req.body;
+        const payMethod = (payment_method || 'Cash').toLowerCase();
+        
+        // Bulletproof Date Logic: Use the same format as billing
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+
+        // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
+        const [futureRows] = await connection.query(
+            "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
+            [id, todayIST + ' 23:59:59']
+        );
+        const futureAmount = parseFloat(futureRows[0].future_amount);
+        const dashboardBalance = newBalance - futureAmount;
+
+        if (cash_amount !== undefined || upi_amount !== undefined || cheque_amount !== undefined) {
+            // Precise split amounts provided
+            const c = parseFloat(cash_amount) || 0;
+            const u = parseFloat(upi_amount) || 0;
+            const q = parseFloat(cheque_amount) || 0;
+
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    cash_collected = cash_collected + VALUES(cash_collected),
+                    upi_collected = upi_collected + VALUES(upi_collected),
+                    cheque_collected = cheque_collected + VALUES(cheque_collected),
+                    total_balance = VALUES(total_balance)
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
+                todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
+        } else {
+            // Fallback to single mode detection
+            const payMethod = (payment_method || 'Cash').toLowerCase();
+            const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
+                payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
+
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     ${columnToUpdate}, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
+                    total_balance = VALUES(total_balance)
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
+                todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
+        }
 
         await connection.commit();
 
@@ -356,9 +479,21 @@ const adjustBalance = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (shops.length === 0) throw new Error('Shop not found');
         const shop = shops[0];
+
+        // Self-Healing: If order_line_id is missing, try to find it by village name
+        let shopOrderLineId = shop.order_line_id;
+        if (!shopOrderLineId) {
+            const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
+            if (ols.length > 0) {
+                shopOrderLineId = ols[0].id;
+                await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
+                console.log(`Self-healed shop ${id}: Linked to order_line ${shopOrderLineId}`);
+            }
+        }
+        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
 
         const adjAmount = parseFloat(amount);
         const newBalance = parseFloat(shop.balance) + adjAmount; // amount can be negative
@@ -370,6 +505,27 @@ const adjustBalance = async (req, res) => {
             'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
         );
+
+        // Update daily_collections for this adjustment
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+
+        // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
+        const [futureRows] = await connection.query(
+            "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
+            [id, todayIST + ' 23:59:59']
+        );
+        const futureAmount = parseFloat(futureRows[0].future_amount);
+        const dashboardBalance = newBalance - futureAmount;
+
+        await connection.query(`
+            INSERT INTO daily_collections
+                (shop_id, shop_name, village_name, order_line_id, collection_date,
+                 old_balance, total_balance)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                total_balance = VALUES(total_balance)
+        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, parseFloat(shop.balance), dashboardBalance]);
 
         await connection.commit();
 

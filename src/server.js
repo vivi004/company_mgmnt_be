@@ -27,6 +27,7 @@ const categoryRoutes = require('./routes/categoryRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
 const billRoutes = require('./routes/billRoutes');
 const productRoutes = require('./routes/productRoutes');
+const collectionRoutes = require('./routes/collectionRoutes');
 
 app.use('/api/employees', employeeRoutes);
 app.use('/api/auth', authRoutes);
@@ -37,6 +38,7 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/bills', billRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/products', productRoutes);
+app.use('/api/collections', collectionRoutes);
 
 
 app.get('/api/health', (req, res) => {
@@ -90,29 +92,57 @@ app.listen(PORT, async () => {
             VALUES (1, 1001, 1000)
         `);
 
-        // Ensure bills table has shop_id for robust consistency
+        // --- BILLS TABLE STABILIZATION ---
+        // Ensure all modern columns exist for financial synchronization
+        const billColumns = [
+            { name: 'shop_id', type: 'INT AFTER id' },
+            { name: 'total_amount', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
+            { name: 'delivery_date', type: 'DATETIME DEFAULT NULL' },
+            { name: 'is_edited_price', type: 'BOOLEAN DEFAULT FALSE' },
+            { name: 'is_applied_to_balance', type: 'BOOLEAN DEFAULT FALSE' }
+        ];
+
+        for (const col of billColumns) {
+            try {
+                await db.query(`ALTER TABLE bills ADD COLUMN ${col.name} ${col.type}`);
+                console.log(`Column '${col.name}' added to bills.`);
+            } catch (e) {
+                // Column likely exists, skip
+            }
+        }
+
+        // Migration: Populate shop_id based on name matches for legacy bills
         try {
-            await db.query('ALTER TABLE bills ADD COLUMN shop_id INT AFTER id');
-            console.log('shop_id column added to bills.');
-            
-            // Migration: Populate shop_id based on current shop_name/village_name matches
             await db.query(`
                 UPDATE bills b
-                JOIN shops s ON b.shop_name = s.shop_name AND b.village_name = s.village_name
+                JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name)
                 SET b.shop_id = s.id
                 WHERE b.shop_id IS NULL
             `);
-            console.log('Existing bills migrated to use shop_id.');
-        } catch (e) {}
-
-        // Data Cleanup: Merge "PTATHAP K" (typo) into "PRADAP K"
-        try {
-            await db.query("UPDATE bills SET created_by = 'PRADAP K' WHERE created_by = 'PTATHAP K'");
-            await db.query("UPDATE shop_transactions SET created_by = 'PRADAP K' WHERE created_by = 'PTATHAP K'");
-            console.log('Legacy name records merged (PTATHAP -> PRADAP).');
+            console.log('Existing bills linked to Shop IDs.');
         } catch (e) {
-            console.error('Data cleanup warning:', e.message);
+            console.error('Bill migration warning:', e.message);
         }
+
+        // Ensure daily_collections table exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS daily_collections (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                shop_id INT NOT NULL,
+                shop_name VARCHAR(255) NOT NULL,
+                village_name VARCHAR(255) NOT NULL,
+                order_line_id INT NOT NULL,
+                collection_date DATE NOT NULL,
+                todays_bill_amount DECIMAL(12, 2) DEFAULT 0.00,
+                cash_collected DECIMAL(12, 2) DEFAULT 0.00,
+                upi_collected DECIMAL(12, 2) DEFAULT 0.00,
+                cheque_collected DECIMAL(12, 2) DEFAULT 0.00,
+                old_balance DECIMAL(12, 2) DEFAULT 0.00,
+                total_balance DECIMAL(12, 2) DEFAULT 0.00,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_shop_date (shop_id, collection_date)
+            )
+        `);
 
         console.log('Database tables verified/initialized.');
     } catch (err) {

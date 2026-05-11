@@ -2,7 +2,8 @@ const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 
 exports.createBill = async (req, res) => {
-    let { shop_name, village_name, phone, cart, custom_rates, created_by, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
+    const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
+    let { shop_name, village_name, created_by } = req.body;
     
     // Trim names to prevent lookup errors
     shop_name = shop_name?.trim();
@@ -20,10 +21,10 @@ exports.createBill = async (req, res) => {
         }
     }
 
-    if (!shop_name || !village_name || !cart) {
+    if ((!shop_id && (!shop_name || !village_name)) || !cart) {
         return res.status(400).json({
             message: 'Missing required fields',
-            detail: 'Shop name, village name, and cart are required.'
+            detail: 'Shop ID or (Shop Name and Village Name), and cart are required.'
         });
     }
 
@@ -31,59 +32,63 @@ exports.createBill = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Get the shop ID and current balance
-        let [shops] = await connection.query(
-            'SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE',
-            [shop_name, village_name]
-        );
-
+        // 1. Get the shop ID, current balance, and order_line_id
         let shop;
-        if (shops.length === 0) {
-            // AUTO-CREATE SHOP for "Temporary" / New Shop billing
-            console.log(`Shop "${shop_name}" not found. Auto-creating for temporary billing...`);
-            
-            // First, find or create the village (order_line)
-            let [orderLines] = await connection.query('SELECT id FROM order_lines WHERE name = ?', [village_name]);
-            let orderLineId;
-            
-            if (orderLines.length > 0) {
-                orderLineId = orderLines[0].id;
-            } else {
-                // Create new village if it doesn't exist
-                const nodeId = `TEMP-${Date.now()}`;
-                const [olResult] = await connection.query(
-                    'INSERT INTO order_lines (name, node_id) VALUES (?, ?)',
-                    [village_name, nodeId]
-                );
-                orderLineId = olResult.insertId;
-            }
-
-            // Create the new shop
-            const [shopResult] = await connection.query(
-                'INSERT INTO shops (order_line_id, shop_name, village_name, phone, balance) VALUES (?, ?, ?, ?, ?)',
-                [orderLineId, shop_name, village_name, phone || '', 0]
-            );
-            
-            shop = { id: shopResult.insertId, balance: 0 };
-
-            // Log new shop creation to ledger webhook
-            webhookService.sendTransactionToWebhook({
-                shop_id: shop.id,
-                shop_name: shop_name,
-                village_name: village_name,
-                type: 'Registration',
-                amount: 0,
-                description: 'Auto-created via Manual Bill Generation',
-                balance_before: 0,
-                balance_after: 0,
-                created_by: created_by || 'Admin'
-            });
-        } else {
-            shop = shops[0];
+        if (shop_id) {
+            const [rows] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE id = ? FOR UPDATE', [shop_id]);
+            if (rows.length > 0) shop = rows[0];
         }
 
-        // 2. Start Transaction
-        await connection.beginTransaction();
+        if (!shop) {
+            let [shops] = await connection.query(
+                'SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
+                [shop_name, village_name]
+            );
+
+            if (shops.length === 0) {
+                // AUTO-CREATE SHOP for "Temporary" / New Shop billing
+                console.log(`Shop "${shop_name}" not found. Auto-creating for temporary billing...`);
+                
+                // First, find or create the village (order_line)
+                let [orderLines] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?)', [village_name]);
+                let orderLineId;
+                
+                if (orderLines.length > 0) {
+                    orderLineId = orderLines[0].id;
+                } else {
+                    // Create new village if it doesn't exist
+                    const nodeId = `TEMP-${Date.now()}`;
+                    const [olResult] = await connection.query(
+                        'INSERT INTO order_lines (name, node_id) VALUES (?, ?)',
+                        [village_name, nodeId]
+                    );
+                    orderLineId = olResult.insertId;
+                }
+
+                // Create the new shop
+                const [shopResult] = await connection.query(
+                    'INSERT INTO shops (order_line_id, shop_name, village_name, phone, balance) VALUES (?, ?, ?, ?, ?)',
+                    [orderLineId, shop_name, village_name, phone || '', 0]
+                );
+                
+                shop = { id: shopResult.insertId, balance: 0, order_line_id: orderLineId, shop_name, village_name };
+
+                // Log new shop creation to ledger webhook
+                webhookService.sendTransactionToWebhook({
+                    shop_id: shop.id,
+                    shop_name: shop_name,
+                    village_name: village_name,
+                    type: 'Registration',
+                    amount: 0,
+                    description: 'Auto-created via Manual Bill Generation',
+                    balance_before: 0,
+                    balance_after: 0,
+                    created_by: created_by || 'Admin'
+                });
+            } else {
+                shop = shops[0];
+            }
+        }
 
         // 3. Get and Lock the next invoice number
         const [rows] = await connection.query('SELECT next_invoice_no FROM app_settings WHERE id = 1 FOR UPDATE');
@@ -122,27 +127,31 @@ exports.createBill = async (req, res) => {
             }
         }
 
-        // 5. Insert the bill
+        // 5. Handle Balance Application (Deferred if delivery date is in the future)
         const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
         const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
         const amount = parseFloat(total_amount) || 0;
 
-        const [billResult] = await connection.query(
-            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, String(assignedInvoiceNo), shop_name, village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0]
-        );
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayStr = dateRows[0].today;
+        const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : todayStr;
+        const shouldApplyNow = deliveryDateOnly <= todayStr;
 
-        // 6. Update Shop Balance
-        const newBalance = parseFloat(shop.balance) + amount;
-        await connection.query(
-            'UPDATE shops SET balance = ? WHERE id = ?',
-            [newBalance, shop.id]
+        let finalBalance = parseFloat(shop.balance);
+        if (shouldApplyNow) {
+            finalBalance += amount;
+            await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [finalBalance, shop.id]);
+        }
+        
+        const [billResult] = await connection.query(
+            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, shouldApplyNow ? 1 : 0]
         );
 
         // 7. Create Shop Transaction (Ledger Entry)
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, newBalance, created_by || 'Staff', mysqlDate]
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}${shouldApplyNow ? '' : ' (Deferred)'}`, finalBalance, created_by || 'Staff', mysqlDate]
         );
 
         // 8. Increment the next invoice number
@@ -151,18 +160,34 @@ exports.createBill = async (req, res) => {
             [assignedInvoiceNo]
         );
 
+        // 8b. Update daily_collections
+        const rawCollDate = mysqlDeliveryDate || mysqlDate;
+        const collectionDateStr = rawCollDate.split(' ')[0];
+        const shopOrderLineId = shop.order_line_id;
+
+        await connection.query(`
+            INSERT INTO daily_collections 
+                (shop_id, shop_name, village_name, order_line_id, collection_date, 
+                 todays_bill_amount, old_balance, total_balance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE 
+                todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                total_balance = VALUES(total_balance)
+        `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId, collectionDateStr, 
+            amount, parseFloat(shop.balance), parseFloat(shop.balance) + amount]);
+
         await connection.commit();
 
         // 9. Push to Webhook (Background)
         webhookService.sendTransactionToWebhook({
             shop_id: shop.id,
-            shop_name: shop_name,
-            village_name: village_name,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
             type: 'Bill',
             amount: amount,
-            description: `Invoice #${assignedInvoiceNo}`,
+            description: `Invoice #${assignedInvoiceNo}${shouldApplyNow ? '' : ' (Deferred)'}`,
             balance_before: shop.balance,
-            balance_after: newBalance,
+            balance_after: finalBalance,
             created_by: created_by || 'Staff',
             reference_id: billResult.insertId
         });
@@ -171,7 +196,7 @@ exports.createBill = async (req, res) => {
             message: 'Bill created successfully',
             id: billResult.insertId,
             invoice_no: assignedInvoiceNo,
-            new_balance: newBalance
+            new_balance: finalBalance
         });
     } catch (err) {
         if (connection) await connection.rollback();
@@ -189,11 +214,10 @@ exports.getAllBills = async (req, res) => {
     try {
         // Primary ledger = only verified bills
         const [rows] = await db.query(`
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
+            SELECT b.*, s.phone, s.phone2, s.order_line_id
             FROM bills b 
-            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
+            LEFT JOIN shops s ON b.shop_id = s.id
             WHERE b.status = "Verified" 
-            GROUP BY b.id
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
         const mapped = rows.map(row => {
@@ -213,11 +237,10 @@ exports.getAllBills = async (req, res) => {
 exports.getUnverifiedBills = async (req, res) => {
     try {
         const [rows] = await db.query(`
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
+            SELECT b.*, s.phone, s.phone2, s.order_line_id
             FROM bills b 
-            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
+            LEFT JOIN shops s ON b.shop_id = s.id
             WHERE b.status = "Unverified" 
-            GROUP BY b.id
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
         const mapped = rows.map(row => {
@@ -252,7 +275,12 @@ exports.deleteBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get bill details
-        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by FROM bills WHERE id = ?', [id]);
+        const [bills] = await connection.query(`
+            SELECT shop_id, shop_name, village_name, total_amount, invoice_no, created_by, is_applied_to_balance,
+            DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str, 
+            DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str 
+            FROM bills WHERE id = ?
+        `, [id]);
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
@@ -264,21 +292,31 @@ exports.deleteBill = async (req, res) => {
         }
         const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (bill.created_by || 'Admin');
 
-        // 2. Get shop details
-        const [shops] = await connection.query('SELECT id, balance FROM shops WHERE shop_name = ? AND village_name = ? FOR UPDATE', [bill.shop_name, bill.village_name]);
+        // 2. Get shop details (Try ID first, then fallback to name for legacy bills)
+        let [shops] = await connection.query('SELECT id, balance, shop_name, village_name, order_line_id FROM shops WHERE id = ? FOR UPDATE', [bill.shop_id]);
+        if (shops.length === 0) {
+            [shops] = await connection.query(
+                'SELECT id, balance, shop_name, village_name, order_line_id FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
+                [bill.shop_name, bill.village_name]
+            );
+        }
+
         if (shops.length > 0) {
             const shop = shops[0];
             const amount = parseFloat(bill.total_amount);
-            const newBalance = parseFloat(shop.balance) - amount;
-
-            // 3. Update shop balance
-            await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
-
-            // 4. Create "Cancellation" Ledger Entry
-            await connection.query(
-                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName]
-            );
+            
+            // Only reverse balance if it was already applied
+            let newBalance = parseFloat(shop.balance);
+            if (bill.is_applied_to_balance) {
+                newBalance -= amount;
+                await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
+                
+                // 4. Create "Cancellation" Ledger Entry
+                await connection.query(
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName]
+                );
+            }
 
             // 5. Push to Webhook
             webhookService.sendTransactionToWebhook({
@@ -292,6 +330,16 @@ exports.deleteBill = async (req, res) => {
                 balance_after: newBalance,
                 created_by: actingUserName
             });
+
+            // 5b. Reverse from daily_collections
+            const delDateStr = bill.delivery_date_str || bill.bill_date_str;
+            
+            await connection.query(`
+                UPDATE daily_collections
+                SET todays_bill_amount = todays_bill_amount - ?,
+                    total_balance = total_balance - ?
+                WHERE shop_id = ? AND collection_date = ?
+            `, [amount, amount, shop.id, delDateStr]);
         }
 
         // 6. Delete the bill
@@ -316,7 +364,13 @@ exports.updateBill = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get old bill details
-        const [bills] = await connection.query('SELECT shop_name, village_name, total_amount, invoice_no, created_by, delivery_date FROM bills WHERE id = ? FOR UPDATE', [id]);
+        const [bills] = await connection.query(`
+            SELECT shop_id, shop_name, village_name, total_amount, invoice_no, created_by, 
+            DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str, 
+            DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str,
+            cart, custom_rates, is_edited_price 
+            FROM bills WHERE id = ? FOR UPDATE
+        `, [id]);
         if (bills.length === 0) throw new Error('Bill not found');
         const bill = bills[0];
 
@@ -334,6 +388,7 @@ exports.updateBill = async (req, res) => {
         const diff = newAmount - oldAmount;
 
         // 3. Update shop balance if there's a difference
+        let shopId = null;
         if (diff !== 0) {
             const [shops] = await connection.query(
                 'SELECT id, balance FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE', 
@@ -341,6 +396,7 @@ exports.updateBill = async (req, res) => {
             );
             if (shops.length > 0) {
                 const shop = shops[0];
+                shopId = shop.id;
                 const newBalance = parseFloat(shop.balance) + diff;
                 await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
 
@@ -365,7 +421,7 @@ exports.updateBill = async (req, res) => {
             }
         }
 
-        // 6. Update the bill
+        // 6. Delivery Date Handling
         let mysqlDeliveryDate = bill.delivery_date ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') : null;
         if (req.body.delivery_date) {
             try {
@@ -375,6 +431,53 @@ exports.updateBill = async (req, res) => {
                     mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
                 }
             } catch (e) { }
+        }
+
+        // 6b. Update daily_collections
+        // Fetch shop details for collections (needed for order_line_id)
+        // 3. Get shop details (Try ID first, then fallback to name for legacy bills)
+        let [collShops] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE id = ? FOR UPDATE', [bill.shop_id]);
+        if (collShops.length === 0) {
+            [collShops] = await connection.query(
+                'SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
+                [bill.shop_name, bill.village_name]
+            );
+        }
+        const collShop = collShops[0];
+
+        if (collShop) {
+            const oldDateStr = bill.delivery_date_str || bill.bill_date_str;
+            const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
+
+            if (oldDateStr !== newDateStr) {
+                // Date changed: Move amount from old date to new date
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET todays_bill_amount = todays_bill_amount - ?,
+                        total_balance = total_balance - ?
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [oldAmount, oldAmount, collShop.id, oldDateStr]);
+
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         todays_bill_amount, old_balance, total_balance)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                        total_balance = VALUES(total_balance)
+                `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr,
+                    newAmount, parseFloat(collShop.balance), parseFloat(collShop.balance) + newAmount]);
+            } else if (diff !== 0) {
+                // Same date, just update difference
+                const finalBalance = parseFloat(collShop.balance) + diff;
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET todays_bill_amount = todays_bill_amount + ?,
+                        total_balance = ?
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [diff, finalBalance, collShop.id, newDateStr]);
+            }
         }
 
         await connection.query(
@@ -388,9 +491,6 @@ exports.updateBill = async (req, res) => {
                 id
             ]
         );
-
-        // 7. Removed updating transaction date in ledger when delivery date changes
-        // The ledger should always reflect the exact time the invoice was generated, not when it is delivered.
 
         await connection.commit();
         res.json({ message: 'Bill updated and balance adjusted successfully' });
@@ -407,9 +507,9 @@ exports.getBillsByDateRange = async (req, res) => {
     const { startDate, endDate } = req.query;
     try {
         let query = `
-            SELECT b.*, MAX(s.phone) as phone, MAX(s.phone2) as phone2, MAX(s.order_line_id) as order_line_id, MAX(s.id) as shop_id 
+            SELECT b.*, s.phone, s.phone2, s.order_line_id
             FROM bills b 
-            LEFT JOIN shops s ON TRIM(b.shop_name) = TRIM(s.shop_name) AND TRIM(b.village_name) = TRIM(s.village_name) 
+            LEFT JOIN shops s ON b.shop_id = s.id 
             WHERE b.status = "Verified"
         `;
         const params = [];

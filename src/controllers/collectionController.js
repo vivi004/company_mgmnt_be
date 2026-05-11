@@ -1,0 +1,74 @@
+const db = require('../config/db');
+
+/**
+ * GET /api/collections?date=YYYY-MM-DD
+ * Returns all daily_collections grouped by order_line for the given date.
+ * Admin-only: sees all order lines.
+ */
+exports.getCollectionsByDate = async (req, res) => {
+    const { date } = req.query;
+    if (!date) {
+        return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
+    }
+    try {
+        const [rows] = await db.query(`
+            SELECT dc.*, ol.name AS order_line_name, ol.node_id
+            FROM daily_collections dc
+            JOIN order_lines ol ON dc.order_line_id = ol.id
+            WHERE dc.collection_date = ?
+            ORDER BY ol.name ASC, dc.shop_name ASC
+        `, [date]);
+        res.json(rows);
+    } catch (err) {
+        console.error('getCollectionsByDate error:', err);
+        res.status(500).json({ error: 'Failed to fetch collections' });
+    }
+};
+
+/**
+ * GET /api/collections/by-orderline/:olId?date=YYYY-MM-DD
+ * Returns daily_collections for a specific order line + date.
+ * Both Admin and Staff can access (staff access verified below).
+ */
+exports.getCollectionsByOrderLine = async (req, res) => {
+    const { olId } = req.params;
+    const { date } = req.query;
+    if (!date) {
+        return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
+    }
+
+    // Staff access check: verify the user has access to this order line
+    if (req.user && req.user.role === 'staff') {
+        try {
+            const [empRows] = await db.query(
+                'SELECT accessible_orderlines FROM employees WHERE id = ?',
+                [req.user.id]
+            );
+            if (empRows.length > 0) {
+                let accessible = empRows[0].accessible_orderlines;
+                if (typeof accessible === 'string') {
+                    try { accessible = JSON.parse(accessible); } catch { accessible = []; }
+                }
+                if (Array.isArray(accessible) && !accessible.includes(parseInt(olId))) {
+                    return res.status(403).json({ error: 'Access denied to this order line' });
+                }
+            }
+        } catch (e) {
+            console.error('Staff access check error:', e);
+        }
+    }
+
+    try {
+        const [rows] = await db.query(`
+            SELECT dc.*, ol.name AS order_line_name, ol.node_id
+            FROM daily_collections dc
+            JOIN order_lines ol ON dc.order_line_id = ol.id
+            WHERE dc.order_line_id = ? AND dc.collection_date = ?
+            ORDER BY dc.shop_name ASC
+        `, [olId, date]);
+        res.json(rows);
+    } catch (err) {
+        console.error('getCollectionsByOrderLine error:', err);
+        res.status(500).json({ error: 'Failed to fetch collections for order line' });
+    }
+};

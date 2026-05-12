@@ -555,11 +555,12 @@ const adjustBalance = async (req, res) => {
         await connection.query(`
             INSERT INTO daily_collections
                 (shop_id, shop_name, village_name, order_line_id, collection_date,
-                 old_balance, total_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 adjustments, old_balance, total_balance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
+                adjustments = adjustments + VALUES(adjustments),
                 total_balance = VALUES(total_balance)
-        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, parseFloat(shop.balance), dashboardBalance]);
+        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), dashboardBalance]);
 
         await connection.commit();
 

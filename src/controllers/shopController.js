@@ -373,11 +373,26 @@ const collectPayment = async (req, res) => {
         const payAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
 
-        if (payAmount > currentBalance) {
-            throw new Error(`Total balance is ₹${currentBalance.toLocaleString('en-IN')}, invalid to collect`);
+        // ── PAYMENT SHIELD: Calculate Active Debt (Total - Future) ──
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+        const [collRows] = await connection.query(
+            "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
+            [id, todayIST]
+        );
+        
+        // If row exists, activeDebt = total - future. 
+        // If not, it means no transactions today yet, so current shop balance is the active debt.
+        const activeDebt = collRows.length > 0 ? (collRows[0].total_balance - collRows[0].future_bills) : currentBalance;
+
+        if (payAmount > activeDebt + 0.01) {
+            return res.status(400).json({ 
+                message: `Invalid to collect future bill amount. Max collectible: ₹${activeDebt.toFixed(2)}` 
+            });
         }
 
         const newBalance = currentBalance - payAmount;
+        const delta = -payAmount; // The change to ripple forward
 
         // 2. Update shop_balances
         await connection.query(
@@ -395,9 +410,7 @@ const collectPayment = async (req, res) => {
         const { cash_amount, upi_amount, cheque_amount } = req.body;
         const payMethod = (payment_method || 'Cash').toLowerCase();
         
-        // Bulletproof Date Logic: Use the same format as billing
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
-        const todayIST = dateRows[0].today;
+
 
         // Use actual balance for total_balance column
         const dashboardBalance = newBalance;
@@ -421,10 +434,14 @@ const collectPayment = async (req, res) => {
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
 
-            // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
+            // This updates both the starting balance (old_balance) and ending balance (total_balance)
             await connection.query(`
-                UPDATE daily_collections SET total_balance = ? WHERE shop_id = ? AND collection_date > ?
-            `, [dashboardBalance, id, todayIST]);
+                UPDATE daily_collections 
+                SET old_balance = old_balance + ?, 
+                    total_balance = total_balance + ? 
+                WHERE shop_id = ? AND collection_date > ?
+            `, [delta, delta, id, todayIST]);
         } else {
             // Fallback to single mode detection
             const payMethod = (payment_method || 'Cash').toLowerCase();
@@ -442,10 +459,13 @@ const collectPayment = async (req, res) => {
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
 
-            // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
             await connection.query(`
-                UPDATE daily_collections SET total_balance = ? WHERE shop_id = ? AND collection_date > ?
-            `, [dashboardBalance, id, todayIST]);
+                UPDATE daily_collections 
+                SET old_balance = old_balance + ?, 
+                    total_balance = total_balance + ? 
+                WHERE shop_id = ? AND collection_date > ?
+            `, [delta, delta, id, todayIST]);
         }
 
         await connection.commit();
@@ -572,12 +592,13 @@ const adjustBalance = async (req, res) => {
                 total_balance = VALUES(total_balance)
         `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), dashboardBalance]);
 
-        // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+        // SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
         await connection.query(`
             UPDATE daily_collections 
-            SET total_balance = ? 
+            SET old_balance = old_balance + ?, 
+                total_balance = total_balance + ? 
             WHERE shop_id = ? AND collection_date > ?
-        `, [dashboardBalance, id, todayIST]);
+        `, [adjAmount, adjAmount, id, todayIST]);
 
         await connection.commit();
 

@@ -201,12 +201,14 @@ exports.createBill = async (req, res) => {
                 amount, finalBalance]);
         }
 
-        // C. PROPAGATION: Ensure all FUTURE rows for this shop are in sync with the new final balance
+        // C. SMART PROPAGATION: Ripple the bill amount to all FUTURE rows
+        // This updates both the starting balance (old_balance) and ending balance (total_balance)
         await connection.query(`
             UPDATE daily_collections 
-            SET total_balance = ? 
+            SET old_balance = old_balance + ?, 
+                total_balance = total_balance + ? 
             WHERE shop_id = ? AND collection_date > ?
-        `, [finalBalance, shop.id, todayStr]);
+        `, [amount, amount, shop.id, todayStr]);
 
         await connection.commit();
 
@@ -410,12 +412,13 @@ exports.deleteBill = async (req, res) => {
                 `, [newBalance, shop.id, todayStr]);
             }
 
-            // PROPAGATION: Ensure all FUTURE rows for this shop are in sync with the new final balance
+            // SMART PROPAGATION: Ripple the delta (-amount) to all FUTURE rows
             await connection.query(`
                 UPDATE daily_collections 
-                SET total_balance = ? 
+                SET old_balance = old_balance + ?, 
+                    total_balance = total_balance + ? 
                 WHERE shop_id = ? AND collection_date > ?
-            `, [newBalance, shop.id, todayStr]);
+            `, [-amount, -amount, shop.id, todayStr]);
         }
 
         // 6. Delete the bill

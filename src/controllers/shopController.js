@@ -41,12 +41,14 @@ const getShopsByOrderLine = async (req, res) => {
         await autoLandBills(connection);
         const [shops] = await connection.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
+                    ol.area_name,
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
                         WHERE b.shop_id = s.id
                         AND DATE(b.created_at) = CURDATE()
                     ) AS UNSIGNED) as has_order_today
              FROM shops s 
+             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
              WHERE s.order_line_id = ? 
              ORDER BY s.shop_name ASC`,
             [order_line_id]
@@ -67,7 +69,7 @@ const getAllShops = async (req, res) => {
         await autoLandBills(connection);
         const [shops] = await connection.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
-                    ol.name AS ol_village_name, ol.node_id
+                    ol.name AS ol_village_name, ol.area_name, ol.node_id
              FROM shops s
              JOIN order_lines ol ON s.order_line_id = ol.id
              ORDER BY ol.name ASC, s.shop_name ASC`
@@ -111,6 +113,7 @@ const createShop = async (req, res) => {
             shop_id: result.insertId,
             shop_name: shop_name,
             village_name: village_name || '',
+            specific_area: owner_name || '',
             type: 'Registration',
             amount: startBalance,
             description: 'Shop Registered (Opening Balance)',
@@ -138,7 +141,7 @@ const updateShop = async (req, res) => {
         await connection.beginTransaction();
 
         // Fetch current shop to check for balance and name changes
-        const [oldShops] = await connection.query('SELECT shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [oldShops] = await connection.query('SELECT shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (oldShops.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Shop not found' });
@@ -204,6 +207,7 @@ const updateShop = async (req, res) => {
                 shop_id: id,
                 shop_name: shop_name,
                 village_name: village_name || '',
+                specific_area: owner_name || '',
                 type: 'Adjustment',
                 amount: newBalance - oldBalance,
                 description: 'Manual Balance Update (Edit Shop)',
@@ -232,7 +236,7 @@ const deleteShop = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Fetch details before deletion for the log
-        const [shops] = await connection.query('SELECT shop_name, village_name, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query('SELECT shop_name, village_name, owner_name as specific_area, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (shops.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Shop not found' });
@@ -255,6 +259,7 @@ const deleteShop = async (req, res) => {
             shop_id: id,
             shop_name: shop.shop_name,
             village_name: shop.village_name,
+            specific_area: shop.specific_area,
             type: 'Deletion',
             amount: 0,
             description: 'Shop Deleted / Account Closed',
@@ -287,7 +292,7 @@ const deleteShop = async (req, res) => {
 // Sync All Shops to Ledger (One-time export)
 const syncAllShopsToLedger = async (req, res) => {
     try {
-        const [shops] = await db.query('SELECT id, shop_name, village_name, balance FROM shops');
+        const [shops] = await db.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance FROM shops');
         
         // Split into batches of 100 to prevent timeouts
         const BATCH_SIZE = 100;
@@ -297,6 +302,7 @@ const syncAllShopsToLedger = async (req, res) => {
                 shop_id: shop.id,
                 shop_name: shop.shop_name,
                 village_name: shop.village_name,
+                specific_area: shop.specific_area,
                 type: 'Opening Balance',
                 amount: parseFloat(shop.balance),
                 description: 'Initial Bulk Sync',
@@ -339,7 +345,7 @@ const collectPayment = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (shops.length === 0) throw new Error('Shop not found');
         const shop = shops[0];
 
@@ -425,6 +431,7 @@ const collectPayment = async (req, res) => {
             shop_id: id,
             shop_name: shop.shop_name,
             village_name: shop.village_name,
+            specific_area: shop.specific_area,
             type: 'Payment',
             amount: -payAmount,
             payment_method: payment_method || 'Cash',
@@ -479,7 +486,7 @@ const adjustBalance = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
         if (shops.length === 0) throw new Error('Shop not found');
         const shop = shops[0];
 
@@ -534,6 +541,7 @@ const adjustBalance = async (req, res) => {
             shop_id: id,
             shop_name: shop.shop_name,
             village_name: shop.village_name,
+            specific_area: shop.specific_area,
             type: 'Adjustment',
             amount: adjAmount,
             description: description || 'Manual Adjustment',

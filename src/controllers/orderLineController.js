@@ -3,7 +3,7 @@ const db = require('../config/db');
 exports.getAllOrderLines = async (req, res) => {
     try {
         const [rows] = await db.query(`
-            SELECT ol.*, 
+            SELECT ol.id, ol.name, ol.area_name, ol.node_id, ol.created_at, 
                    COALESCE(SUM(s.balance), 0) as total_balance,
                    COUNT(s.id) as shop_count
             FROM order_lines ol
@@ -19,13 +19,13 @@ exports.getAllOrderLines = async (req, res) => {
 };
 
 exports.createOrderLine = async (req, res) => {
-    const { name, node_id } = req.body;
+    const { name, node_id, area_name } = req.body;
     try {
         const [result] = await db.query(
-            'INSERT INTO order_lines (name, node_id) VALUES (?, ?)',
-            [name, node_id]
+            'INSERT INTO order_lines (name, area_name, node_id) VALUES (?, ?, ?)',
+            [name, area_name || name, node_id]
         );
-        res.status(201).json({ id: result.insertId, name, node_id });
+        res.status(201).json({ id: result.insertId, name, area_name: area_name || name, node_id });
     } catch (err) {
         console.error('Error adding order line:', err);
         if (err.code === 'ER_DUP_ENTRY') {
@@ -134,7 +134,7 @@ exports.rejectDeleteRequest = async (req, res) => {
 
 exports.updateOrderLine = async (req, res) => {
     const { id } = req.params;
-    const { name, node_id } = req.body;
+    const { name, node_id, area_name } = req.body;
     try {
         const connection = await db.getConnection();
         try {
@@ -144,10 +144,10 @@ exports.updateOrderLine = async (req, res) => {
             const [oldRows] = await connection.query('SELECT name FROM order_lines WHERE id = ?', [id]);
             const oldName = oldRows.length > 0 ? oldRows[0].name : null;
 
-            // 2. Update the order line
+            // 2. Update the order line (including area_name)
             await connection.query(
-                'UPDATE order_lines SET name = ?, node_id = ? WHERE id = ?',
-                [name, node_id, id]
+                'UPDATE order_lines SET name = ?, area_name = ?, node_id = ? WHERE id = ?',
+                [name, area_name || name, node_id, id]
             );
             
             // 3. Sync the village_name in the shops table for consistency

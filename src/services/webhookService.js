@@ -13,11 +13,15 @@ exports.sendTransactionToWebhook = async (transactionData) => {
         // Format to a clean YYYY-MM-DD HH:mm:ss string that Sheets loves
         const istTimestamp = istTime.toISOString().replace('T', ' ').split('.')[0];
         
-        await axios.post(url, {
+        const payload = {
             ...transactionData,
             payment_method: transactionData.payment_method || 'N/A',
             timestamp: istTimestamp
-        });
+        };
+
+        console.log('Pushing to Ledger (Google Sheets):', JSON.stringify(payload, null, 2));
+        
+        await axios.post(url, payload);
         console.log('Transaction pushed to webhook successfully');
     } catch (err) {
         console.error('CRITICAL: Failed to push transaction to ledger (Google Sheets):', err.message);

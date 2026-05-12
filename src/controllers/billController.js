@@ -35,7 +35,7 @@ exports.createBill = async (req, res) => {
         // 1. Get the shop ID, current balance, and order_line_id
         let shop;
         if (shop_id) {
-            const [rows] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE id = ? FOR UPDATE', [shop_id]);
+            const [rows] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name, owner_name as specific_area FROM shops WHERE id = ? FOR UPDATE', [shop_id]);
             if (rows.length > 0) shop = rows[0];
         }
 
@@ -71,13 +71,14 @@ exports.createBill = async (req, res) => {
                     [orderLineId, shop_name, village_name, phone || '', 0]
                 );
                 
-                shop = { id: shopResult.insertId, balance: 0, order_line_id: orderLineId, shop_name, village_name };
+                shop = { id: shopResult.insertId, balance: 0, order_line_id: orderLineId, shop_name, village_name, specific_area: '' };
 
                 // Log new shop creation to ledger webhook
                 webhookService.sendTransactionToWebhook({
                     shop_id: shop.id,
                     shop_name: shop_name,
                     village_name: village_name,
+                    specific_area: '',
                     type: 'Registration',
                     amount: 0,
                     description: 'Auto-created via Manual Bill Generation',
@@ -183,6 +184,7 @@ exports.createBill = async (req, res) => {
             shop_id: shop.id,
             shop_name: shop.shop_name,
             village_name: shop.village_name,
+            specific_area: shop.specific_area || '',
             type: 'Bill',
             amount: amount,
             description: `Invoice #${assignedInvoiceNo}${shouldApplyNow ? '' : ' (Deferred)'}`,
@@ -214,9 +216,10 @@ exports.getAllBills = async (req, res) => {
     try {
         // Primary ledger = only verified bills
         const [rows] = await db.query(`
-            SELECT b.*, s.phone, s.phone2, s.order_line_id
+            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
+            LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Verified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
@@ -237,9 +240,10 @@ exports.getAllBills = async (req, res) => {
 exports.getUnverifiedBills = async (req, res) => {
     try {
         const [rows] = await db.query(`
-            SELECT b.*, s.phone, s.phone2, s.order_line_id
+            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
+            LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Unverified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
         `);
@@ -507,9 +511,10 @@ exports.getBillsByDateRange = async (req, res) => {
     const { startDate, endDate } = req.query;
     try {
         let query = `
-            SELECT b.*, s.phone, s.phone2, s.order_line_id
+            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id 
+            LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Verified"
         `;
         const params = [];

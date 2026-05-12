@@ -420,6 +420,11 @@ const collectPayment = async (req, res) => {
                     total_balance = VALUES(total_balance)
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
+
+            // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+            await connection.query(`
+                UPDATE daily_collections SET total_balance = ? WHERE shop_id = ? AND collection_date > ?
+            `, [dashboardBalance, id, todayIST]);
         } else {
             // Fallback to single mode detection
             const payMethod = (payment_method || 'Cash').toLowerCase();
@@ -436,6 +441,11 @@ const collectPayment = async (req, res) => {
                     total_balance = VALUES(total_balance)
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
+
+            // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+            await connection.query(`
+                UPDATE daily_collections SET total_balance = ? WHERE shop_id = ? AND collection_date > ?
+            `, [dashboardBalance, id, todayIST]);
         }
 
         await connection.commit();
@@ -561,6 +571,13 @@ const adjustBalance = async (req, res) => {
                 manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
                 total_balance = VALUES(total_balance)
         `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), dashboardBalance]);
+
+        // PROPAGATION: Update total_balance for all FUTURE rows of this shop
+        await connection.query(`
+            UPDATE daily_collections 
+            SET total_balance = ? 
+            WHERE shop_id = ? AND collection_date > ?
+        `, [dashboardBalance, id, todayIST]);
 
         await connection.commit();
 

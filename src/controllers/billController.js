@@ -185,22 +185,28 @@ exports.createBill = async (req, res) => {
             amount, parseFloat(shop.balance), finalBalance]);
 
         // B. If the bill is NOT for today, we must update TODAY's total_balance too
-        // and record it in the appropriate column (Future vs Past)
         if (collectionDateStr !== todayStr) {
             const isFuture = collectionDateStr > todayStr;
-            const columnToUpdate = isFuture ? 'future_bills' : 'past_bills';
+            const columnToUpdate = isFuture ? 'future_bills' : 'old_balance'; // Past bills become part of old_balance
 
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     ${columnToUpdate}, old_balance, total_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     ${isFuture ? 'future_bills' : 'old_balance'}, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
-                    ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
+                    ${isFuture ? 'future_bills' : 'old_balance'} = ${isFuture ? 'future_bills' : 'old_balance'} + VALUES(${isFuture ? 'future_bills' : 'old_balance'}),
                     total_balance = VALUES(total_balance)
             `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId, todayStr,
-                amount, parseFloat(shop.balance), finalBalance]);
+                amount, finalBalance]);
         }
+
+        // C. PROPAGATION: Ensure all FUTURE rows for this shop are in sync with the new final balance
+        await connection.query(`
+            UPDATE daily_collections 
+            SET total_balance = ? 
+            WHERE shop_id = ? AND collection_date > ?
+        `, [finalBalance, shop.id, todayStr]);
 
         await connection.commit();
 
@@ -384,18 +390,18 @@ exports.deleteBill = async (req, res) => {
             // If the deleted bill was NOT for today, update today's total_balance too
             if (delDateStr !== todayStr) {
                 const isFuture = delDateStr > todayStr;
-                const columnToUpdate = isFuture ? 'future_bills' : 'past_bills';
+                const columnToUpdate = isFuture ? 'future_bills' : 'old_balance';
 
                 await connection.query(`
                     INSERT INTO daily_collections
                         (shop_id, shop_name, village_name, order_line_id, collection_date,
-                         ${columnToUpdate}, old_balance, total_balance)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         ${columnToUpdate}, total_balance)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON DUPLICATE KEY UPDATE
                         ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
                         total_balance = VALUES(total_balance)
                 `, [shop.id, shop.shop_name, shop.village_name, shop.order_line_id, todayStr,
-                    -amount, parseFloat(shop.balance) + amount, newBalance]);
+                    -amount, newBalance]);
             } else {
                 // Just update today's total balance if it was today
                 await connection.query(`
@@ -403,6 +409,13 @@ exports.deleteBill = async (req, res) => {
                     WHERE shop_id = ? AND collection_date = ?
                 `, [newBalance, shop.id, todayStr]);
             }
+
+            // PROPAGATION: Ensure all FUTURE rows for this shop are in sync with the new final balance
+            await connection.query(`
+                UPDATE daily_collections 
+                SET total_balance = ? 
+                WHERE shop_id = ? AND collection_date > ?
+            `, [newBalance, shop.id, todayStr]);
         }
 
         // 6. Delete the bill

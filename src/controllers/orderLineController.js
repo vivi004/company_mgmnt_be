@@ -4,10 +4,11 @@ exports.getAllOrderLines = async (req, res) => {
     try {
         const [rows] = await db.query(`
             SELECT ol.id, ol.name, ol.area_name, ol.node_id, ol.created_at, 
-                   COALESCE(SUM(s.balance), 0) as total_balance,
+                   COALESCE(SUM(sb.balance), 0) as total_balance,
                    COUNT(s.id) as shop_count
             FROM order_lines ol
             LEFT JOIN shops s ON ol.id = s.order_line_id
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             GROUP BY ol.id
             ORDER BY ol.created_at DESC
         `);
@@ -90,10 +91,13 @@ exports.approveDeleteRequest = async (req, res) => {
             // 1. Delete transactions for all shops in this village
             await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
             
-            // 2. Delete bills for all shops in this village (Now using precise shop IDs)
+            // 2. Delete bills for all shops in this village
             await connection.query('DELETE FROM bills WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
 
-            // 3. Delete the shops
+            // 3. Delete balance records
+            await connection.query('DELETE FROM shop_balances WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
+
+            // 4. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [request.order_line_id]);
             
             // 4. Delete the order line
@@ -201,7 +205,10 @@ exports.deleteOrderLine = async (req, res) => {
             // 2. Delete bills for all shops in this village
             await connection.query('DELETE FROM bills WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
 
-            // 3. Delete the shops
+            // 3. Delete balance records
+            await connection.query('DELETE FROM shop_balances WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
+
+            // 4. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [id]);
             
             // 4. Delete the order line itself

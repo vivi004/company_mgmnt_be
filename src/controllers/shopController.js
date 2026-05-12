@@ -362,7 +362,13 @@ const collectPayment = async (req, res) => {
         if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
 
         const payAmount = parseFloat(amount);
-        const newBalance = parseFloat(shop.balance) - payAmount;
+        const currentBalance = parseFloat(shop.balance) || 0;
+
+        if (payAmount > currentBalance) {
+            throw new Error(`Total balance is ₹${currentBalance.toLocaleString('en-IN')}, invalid to collect`);
+        }
+
+        const newBalance = currentBalance - payAmount;
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 
@@ -503,7 +509,12 @@ const adjustBalance = async (req, res) => {
         if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
 
         const adjAmount = parseFloat(amount);
-        const newBalance = parseFloat(shop.balance) + adjAmount; // amount can be negative
+        const currentBalance = parseFloat(shop.balance) || 0;
+        const newBalance = currentBalance + adjAmount; // amount can be negative
+
+        if (newBalance < 0) {
+            throw new Error(`Resulting balance would be negative (₹${newBalance.toLocaleString('en-IN')}), adjustment cancelled`);
+        }
 
         await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
 

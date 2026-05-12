@@ -136,23 +136,21 @@ exports.createBill = async (req, res) => {
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
         const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : todayStr;
-        const shouldApplyNow = deliveryDateOnly <= todayStr;
+        const shouldApplyNow = true; // Always apply balance immediately as per request
 
         let finalBalance = parseFloat(shop.balance);
-        if (shouldApplyNow) {
-            finalBalance += amount;
-            await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [finalBalance, shop.id]);
-        }
+        finalBalance += amount;
+        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [finalBalance, shop.id]);
         
         const [billResult] = await connection.query(
             'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, shouldApplyNow ? 1 : 0]
+            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, 1]
         );
 
         // 7. Create Shop Transaction (Ledger Entry)
         await connection.query(
             'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}${shouldApplyNow ? '' : ' (Deferred)'}`, finalBalance, created_by || 'Staff', mysqlDate]
+            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDate]
         );
 
         // 8. Increment the next invoice number

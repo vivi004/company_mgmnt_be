@@ -106,3 +106,45 @@ exports.addExpense = async (req, res) => {
         res.status(500).json({ error: 'Failed to add expense' });
     }
 };
+
+/**
+ * PUT /api/collections/expenses/:id
+ * Updates an existing expense.
+ */
+exports.updateExpense = async (req, res) => {
+    const { id } = req.params;
+    const { amount, description } = req.body;
+
+    if (!amount) {
+        return res.status(400).json({ error: 'amount is required' });
+    }
+
+    try {
+        await db.query(`
+            UPDATE daily_expenses 
+            SET amount = ?, description = ?
+            WHERE id = ?
+        `, [amount, description || '', id]);
+
+        res.json({ message: 'Expense updated successfully' });
+    } catch (err) {
+        console.error('updateExpense error:', err);
+        res.status(500).json({ error: 'Failed to update expense' });
+    }
+};
+
+/**
+ * DELETE /api/collections/expenses/:id
+ * Deletes an expense.
+ */
+exports.deleteExpense = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        await db.query('DELETE FROM daily_expenses WHERE id = ?', [id]);
+        res.json({ message: 'Expense deleted successfully' });
+    } catch (err) {
+        console.error('deleteExpense error:', err);
+        res.status(500).json({ error: 'Failed to delete expense' });
+    }
+};

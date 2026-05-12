@@ -12,4 +12,10 @@ router.get('/by-orderline/:olId', authMiddleware, collectionController.getCollec
 // POST a new expense (Admin + Staff)
 router.post('/expenses', authMiddleware, collectionController.addExpense);
 
+// UPDATE an expense (Admin + Staff)
+router.put('/expenses/:id', authMiddleware, collectionController.updateExpense);
+
+// DELETE an expense (Admin + Staff)
+router.delete('/expenses/:id', authMiddleware, collectionController.deleteExpense);
+
 module.exports = router;

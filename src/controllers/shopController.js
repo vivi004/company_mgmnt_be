@@ -557,6 +557,24 @@ const adjustBalance = async (req, res) => {
 
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
+
+        // ── ADJUSTMENT SHIELD: Calculate Active Debt (Total - Future) ──
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+        const [collRows] = await connection.query(
+            "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
+            [id, todayIST]
+        );
+        
+        const activeDebt = collRows.length > 0 ? (collRows[0].total_balance - collRows[0].future_bills) : currentBalance;
+
+        // If trying to subtract (discount) more than what is active
+        if (adjAmount < 0 && Math.abs(adjAmount) > activeDebt + 0.01) {
+            return res.status(400).json({ 
+                message: `Invalid to adjust future bill amount. Max adjustable: ₹${activeDebt.toFixed(2)}` 
+            });
+        }
+
         const newBalance = currentBalance + adjAmount;
 
         if (newBalance < 0) {
@@ -576,8 +594,7 @@ const adjustBalance = async (req, res) => {
         );
 
         // Update daily_collections for this adjustment
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
-        const todayIST = dateRows[0].today;
+
 
         // Use actual balance for total_balance column
         const dashboardBalance = newBalance;

@@ -66,9 +66,43 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             WHERE dc.order_line_id = ? AND dc.collection_date = ?
             ORDER BY dc.shop_name ASC
         `, [olId, date]);
-        res.json(rows);
+
+        // FETCH EXPENSES
+        const [expRows] = await db.query(`
+            SELECT * FROM daily_expenses
+            WHERE order_line_id = ? AND expense_date = ?
+        `, [olId, date]);
+
+        res.json({
+            collections: rows,
+            expenses: expRows
+        });
     } catch (err) {
         console.error('getCollectionsByOrderLine error:', err);
         res.status(500).json({ error: 'Failed to fetch collections for order line' });
+    }
+};
+
+/**
+ * POST /api/collections/expenses
+ * Adds a new daily expense.
+ */
+exports.addExpense = async (req, res) => {
+    const { order_line_id, amount, description, date } = req.body;
+
+    if (!order_line_id || !amount || !date) {
+        return res.status(400).json({ error: 'order_line_id, amount, and date are required' });
+    }
+
+    try {
+        await db.query(`
+            INSERT INTO daily_expenses (order_line_id, amount, description, expense_date)
+            VALUES (?, ?, ?, ?)
+        `, [order_line_id, amount, description || '', date]);
+
+        res.json({ message: 'Expense added successfully' });
+    } catch (err) {
+        console.error('addExpense error:', err);
+        res.status(500).json({ error: 'Failed to add expense' });
     }
 };

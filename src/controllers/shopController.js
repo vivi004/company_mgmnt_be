@@ -2,45 +2,15 @@ const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 
-/**
- * AUTO-LAND BILLS: Moves money from future bills to active shop balances 
- * when the delivery date arrives (midnight).
- */
-async function autoLandBills(connection) {
-    // 1. Move money to shop balances for bills that have reached their delivery date
-    await connection.query(`
-        UPDATE shops s
-        SET s.balance = s.balance + (
-            SELECT COALESCE(SUM(total_amount), 0)
-            FROM bills b
-            WHERE b.shop_id = s.id 
-            AND b.is_applied_to_balance = 0 
-            AND DATE(b.delivery_date) <= CURDATE()
-        )
-        WHERE EXISTS (
-            SELECT 1 FROM bills b 
-            WHERE b.shop_id = s.id 
-            AND b.is_applied_to_balance = 0 
-            AND DATE(b.delivery_date) <= CURDATE()
-        )
-    `);
 
-    // 2. Mark those bills as 'Applied' so we don't count them again
-    await connection.query(`
-        UPDATE bills SET is_applied_to_balance = 1 
-        WHERE is_applied_to_balance = 0 
-        AND DATE(delivery_date) <= CURDATE()
-    `);
-}
 
 // GET all shops for a specific order_line (village)
 const getShopsByOrderLine = async (req, res) => {
     const { order_line_id } = req.params;
-    const connection = await db.getConnection();
     try {
-        await autoLandBills(connection);
-        const [shops] = await connection.query(
-            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
+        const [shops] = await db.query(
+            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
+                    COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.area_name,
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
@@ -48,6 +18,7 @@ const getShopsByOrderLine = async (req, res) => {
                         AND DATE(b.created_at) = CURDATE()
                     ) AS UNSIGNED) as has_order_today
              FROM shops s 
+             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
              LEFT JOIN order_lines ol ON s.order_line_id = ol.id
              WHERE s.order_line_id = ? 
              ORDER BY s.shop_name ASC`,
@@ -57,20 +28,18 @@ const getShopsByOrderLine = async (req, res) => {
     } catch (err) {
         console.error('getShopsByOrderLine error:', err);
         res.status(500).json({ error: 'Failed to fetch shops' });
-    } finally {
-        if (connection) connection.release();
     }
 };
 
 // GET all shops
 const getAllShops = async (req, res) => {
-    const connection = await db.getConnection();
     try {
-        await autoLandBills(connection);
-        const [shops] = await connection.query(
-            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.balance, s.created_at,
+        const [shops] = await db.query(
+            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
+                    COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.name AS ol_village_name, ol.area_name, ol.node_id
              FROM shops s
+             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
              JOIN order_lines ol ON s.order_line_id = ol.id
              ORDER BY ol.name ASC, s.shop_name ASC`
         );
@@ -78,8 +47,6 @@ const getAllShops = async (req, res) => {
     } catch (err) {
         console.error('getAllShops error:', err);
         res.status(500).json({ error: 'Failed to fetch shops' });
-    } finally {
-        if (connection) connection.release();
     }
 };
 
@@ -89,28 +56,38 @@ const createShop = async (req, res) => {
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by } = req.body;
+    const connection = await db.getConnection();
     try {
+        await connection.beginTransaction();
+
         // Safety check: If created_by is missing, fetch the acting user's name from the DB
         if (!created_by && req.user && req.user.id) {
-            try {
-                const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
-                if (users.length > 0) {
-                    created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
-                }
-            } catch (e) {
-                console.error('Failed to fetch user name for shop creation:', e);
+            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
             }
         }
 
         const startBalance = parseFloat(balance) || 0;
-        const [result] = await db.query(
-            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', startBalance]
+        
+        // 1. Insert into shops
+        const [result] = await connection.query(
+            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '']
         );
+        const shopId = result.insertId;
+
+        // 2. Insert into shop_balances
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance, opening_balance) VALUES (?, ?, ?)',
+            [shopId, startBalance, startBalance]
+        );
+
+        await connection.commit();
 
         // Push "Opening Balance" to Webhook
         webhookService.sendTransactionToWebhook({
-            shop_id: result.insertId,
+            shop_id: shopId,
             shop_name: shop_name,
             village_name: village_name || '',
             specific_area: owner_name || '',
@@ -122,10 +99,13 @@ const createShop = async (req, res) => {
             created_by: created_by || 'System'
         });
 
-        res.status(201).json({ id: result.insertId, message: 'Shop created successfully' });
+        res.status(201).json({ id: shopId, message: 'Shop created successfully' });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('createShop error:', err);
         res.status(500).json({ error: 'Failed to create shop' });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
@@ -140,21 +120,33 @@ const updateShop = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Fetch current shop to check for balance and name changes
-        const [oldShops] = await connection.query('SELECT shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
+        // Fetch current shop and balance
+        const [oldShops] = await connection.query(`
+            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id 
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [id]);
+        
         if (oldShops.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Shop not found' });
         }
         
         const oldShop = oldShops[0];
-        const oldBalance = parseFloat(oldShop.balance) || 0;
-        const newBalance = parseFloat(balance) || 0;
+        const oldBalance = parseFloat(oldShop.balance);
+        const newBalance = balance !== undefined ? parseFloat(balance) : oldBalance;
 
-        // 1. Update the shop record
+        // 1. Update shops table (excluding balance)
         await connection.query(
-            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, balance = ? WHERE id = ?`,
-            [shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', newBalance, id]
+            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ? WHERE id = ?`,
+            [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, id]
+        );
+
+        // 2. Update shop_balances table
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [id, newBalance]
         );
 
         // 2. If name or village changed, update ALL related bills to prevent orphans
@@ -236,7 +228,13 @@ const deleteShop = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Fetch details before deletion for the log
-        const [shops] = await connection.query('SELECT shop_name, village_name, owner_name as specific_area, balance FROM shops WHERE id = ? FOR UPDATE', [id]);
+        const [shops] = await connection.query(`
+            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance 
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [id]);
+
         if (shops.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Shop not found' });
@@ -268,12 +266,10 @@ const deleteShop = async (req, res) => {
             created_by: actingUserName
         });
 
-        // 3. Delete related records to prevent orphans
-        // Delete transactions
+        // 3. Delete related records
         await connection.query('DELETE FROM shop_transactions WHERE shop_id = ?', [id]);
-        
-        // Delete bills (Now using shop_id for precise deletion)
         await connection.query('DELETE FROM bills WHERE shop_id = ?', [id]);
+        await connection.query('DELETE FROM shop_balances WHERE shop_id = ?', [id]);
 
         // 4. Finally delete the shop
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);
@@ -292,7 +288,11 @@ const deleteShop = async (req, res) => {
 // Sync All Shops to Ledger (One-time export)
 const syncAllShopsToLedger = async (req, res) => {
     try {
-        const [shops] = await db.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance FROM shops');
+        const [shops] = await db.query(`
+            SELECT s.id, s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance 
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+        `);
         
         // Split into batches of 100 to prevent timeouts
         const BATCH_SIZE = 100;
@@ -345,21 +345,30 @@ const collectPayment = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
-        if (shops.length === 0) throw new Error('Shop not found');
+        // 1. Get current shop and balance
+        const [shops] = await connection.query(`
+            SELECT s.id, s.shop_name, s.village_name, s.order_line_id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [id]);
+        
+        if (shops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
+        }
         const shop = shops[0];
 
-        // Self-Healing: If order_line_id is missing, try to find it by village name
+        // Self-Healing: If order_line_id is missing...
         let shopOrderLineId = shop.order_line_id;
         if (!shopOrderLineId) {
             const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
             if (ols.length > 0) {
                 shopOrderLineId = ols[0].id;
                 await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
-                console.log(`Self-healed shop ${id}: Linked to order_line ${shopOrderLineId}`);
             }
         }
-        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
+        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line.");
 
         const payAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
@@ -370,7 +379,11 @@ const collectPayment = async (req, res) => {
 
         const newBalance = currentBalance - payAmount;
 
-        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
+        // 2. Update shop_balances
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [id, newBalance]
+        );
 
         const mysqlDate = new Date();
         await connection.query(
@@ -386,13 +399,8 @@ const collectPayment = async (req, res) => {
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
 
-        // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
-        const [futureRows] = await connection.query(
-            "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
-            [id, todayIST + ' 23:59:59']
-        );
-        const futureAmount = parseFloat(futureRows[0].future_amount);
-        const dashboardBalance = newBalance - futureAmount;
+        // Use actual balance for total_balance column
+        const dashboardBalance = newBalance;
 
         if (cash_amount !== undefined || upi_amount !== undefined || cheque_amount !== undefined) {
             // Precise split amounts provided
@@ -492,31 +500,44 @@ const adjustBalance = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const [shops] = await connection.query('SELECT id, shop_name, village_name, owner_name as specific_area, balance, order_line_id FROM shops WHERE id = ? FOR UPDATE', [id]);
-        if (shops.length === 0) throw new Error('Shop not found');
+        // 1. Get current shop and balance
+        const [shops] = await connection.query(`
+            SELECT s.id, s.shop_name, s.village_name, s.order_line_id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [id]);
+        
+        if (shops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
+        }
         const shop = shops[0];
 
-        // Self-Healing: If order_line_id is missing, try to find it by village name
+        // Self-Healing...
         let shopOrderLineId = shop.order_line_id;
         if (!shopOrderLineId) {
             const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
             if (ols.length > 0) {
                 shopOrderLineId = ols[0].id;
                 await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
-                console.log(`Self-healed shop ${id}: Linked to order_line ${shopOrderLineId}`);
             }
         }
-        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line. Please edit the shop and select a Village first.");
+        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line.");
 
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
-        const newBalance = currentBalance + adjAmount; // amount can be negative
+        const newBalance = currentBalance + adjAmount;
 
         if (newBalance < 0) {
             throw new Error(`Resulting balance would be negative (₹${newBalance.toLocaleString('en-IN')}), adjustment cancelled`);
         }
 
-        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, id]);
+        // 2. Update shop_balances
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [id, newBalance]
+        );
 
         const mysqlDate = new Date();
         await connection.query(
@@ -528,13 +549,8 @@ const adjustBalance = async (req, res) => {
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
 
-        // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
-        const [futureRows] = await connection.query(
-            "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
-            [id, todayIST + ' 23:59:59']
-        );
-        const futureAmount = parseFloat(futureRows[0].future_amount);
-        const dashboardBalance = newBalance - futureAmount;
+        // Use actual balance for total_balance column
+        const dashboardBalance = newBalance;
 
         await connection.query(`
             INSERT INTO daily_collections

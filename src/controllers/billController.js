@@ -35,28 +35,33 @@ exports.createBill = async (req, res) => {
         // 1. Get the shop ID, current balance, and order_line_id
         let shop;
         if (shop_id) {
-            const [rows] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name, owner_name as specific_area FROM shops WHERE id = ? FOR UPDATE', [shop_id]);
+            const [rows] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.shop_name, s.village_name, s.owner_name as specific_area 
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE s.id = ? FOR UPDATE
+            `, [shop_id]);
             if (rows.length > 0) shop = rows[0];
         }
 
         if (!shop) {
-            let [shops] = await connection.query(
-                'SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
-                [shop_name, village_name]
-            );
+            let [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.shop_name, s.village_name 
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
+            `, [shop_name, village_name]);
 
             if (shops.length === 0) {
-                // AUTO-CREATE SHOP for "Temporary" / New Shop billing
-                console.log(`Shop "${shop_name}" not found. Auto-creating for temporary billing...`);
+                // AUTO-CREATE SHOP
+                console.log(`Shop "${shop_name}" not found. Auto-creating...`);
                 
-                // First, find or create the village (order_line)
                 let [orderLines] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?)', [village_name]);
                 let orderLineId;
                 
                 if (orderLines.length > 0) {
                     orderLineId = orderLines[0].id;
                 } else {
-                    // Create new village if it doesn't exist
                     const nodeId = `TEMP-${Date.now()}`;
                     const [olResult] = await connection.query(
                         'INSERT INTO order_lines (name, node_id) VALUES (?, ?)',
@@ -65,13 +70,16 @@ exports.createBill = async (req, res) => {
                     orderLineId = olResult.insertId;
                 }
 
-                // Create the new shop
                 const [shopResult] = await connection.query(
-                    'INSERT INTO shops (order_line_id, shop_name, village_name, phone, balance) VALUES (?, ?, ?, ?, ?)',
-                    [orderLineId, shop_name, village_name, phone || '', 0]
+                    'INSERT INTO shops (order_line_id, shop_name, village_name, phone) VALUES (?, ?, ?, ?)',
+                    [orderLineId, shop_name, village_name, phone || '']
                 );
+                const newShopId = shopResult.insertId;
                 
-                shop = { id: shopResult.insertId, balance: 0, order_line_id: orderLineId, shop_name, village_name, specific_area: '' };
+                // Initialize balance
+                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?)', [newShopId, 0]);
+
+                shop = { id: newShopId, balance: 0, order_line_id: orderLineId, shop_name, village_name, specific_area: '' };
 
                 // Log new shop creation to ledger webhook
                 webhookService.sendTransactionToWebhook({
@@ -140,7 +148,7 @@ exports.createBill = async (req, res) => {
 
         let finalBalance = parseFloat(shop.balance);
         finalBalance += amount;
-        await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [finalBalance, shop.id]);
+        await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, finalBalance]);
         
         const [billResult] = await connection.query(
             'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -185,7 +193,7 @@ exports.createBill = async (req, res) => {
             specific_area: shop.specific_area || '',
             type: 'Bill',
             amount: amount,
-            description: `Invoice #${assignedInvoiceNo}${shouldApplyNow ? '' : ' (Deferred)'}`,
+            description: `Invoice #${assignedInvoiceNo}`,
             balance_before: shop.balance,
             balance_after: finalBalance,
             created_by: created_by || 'Staff',
@@ -295,12 +303,20 @@ exports.deleteBill = async (req, res) => {
         const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (bill.created_by || 'Admin');
 
         // 2. Get shop details (Try ID first, then fallback to name for legacy bills)
-        let [shops] = await connection.query('SELECT id, balance, shop_name, village_name, order_line_id FROM shops WHERE id = ? FOR UPDATE', [bill.shop_id]);
+        let [shops] = await connection.query(`
+            SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id 
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [bill.shop_id]);
+        
         if (shops.length === 0) {
-            [shops] = await connection.query(
-                'SELECT id, balance, shop_name, village_name, order_line_id FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
-                [bill.shop_name, bill.village_name]
-            );
+            [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id 
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
+            `, [bill.shop_name, bill.village_name]);
         }
 
         if (shops.length > 0) {
@@ -311,7 +327,7 @@ exports.deleteBill = async (req, res) => {
             let newBalance = parseFloat(shop.balance);
             if (bill.is_applied_to_balance) {
                 newBalance -= amount;
-                await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
+                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
                 
                 // 4. Create "Cancellation" Ledger Entry
                 await connection.query(
@@ -392,15 +408,18 @@ exports.updateBill = async (req, res) => {
         // 3. Update shop balance if there's a difference
         let shopId = null;
         if (diff !== 0) {
-            const [shops] = await connection.query(
-                'SELECT id, balance FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE', 
-                [bill.shop_name, bill.village_name]
-            );
+            const [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance 
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
+            `, [bill.shop_name, bill.village_name]);
+            
             if (shops.length > 0) {
                 const shop = shops[0];
                 shopId = shop.id;
                 const newBalance = parseFloat(shop.balance) + diff;
-                await connection.query('UPDATE shops SET balance = ? WHERE id = ?', [newBalance, shop.id]);
+                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
 
                 // 4. Create Ledger Entry for adjustment
                 await connection.query(

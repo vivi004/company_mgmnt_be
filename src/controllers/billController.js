@@ -655,3 +655,57 @@ exports.getBillsByDateRange = async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch bills by date range', detail: err.message });
     }
 };
+
+/**
+ * Internal helper to heal the balance chain for a shop starting from a specific date.
+ */
+async function recalculateShopLedger(connection, shopId, startDateStr) {
+    console.log(`[LEDGER] Recalculating ledger for Shop #${shopId} starting ${startDateStr}`);
+    
+    // 1. Get all records for this shop from the starting date onwards
+    const [rows] = await connection.query(`
+        SELECT * FROM daily_collections 
+        WHERE shop_id = ? AND collection_date >= ?
+        ORDER BY collection_date ASC
+    `, [shopId, startDateStr]);
+
+    // 2. Fetch the starting previous balance
+    const [prevRows] = await connection.query(`
+        SELECT total_balance FROM daily_collections 
+        WHERE shop_id = ? AND collection_date < ?
+        ORDER BY collection_date DESC LIMIT 1
+    `, [shopId, startDateStr]);
+
+    let runningBalance = prevRows.length > 0 ? parseFloat(prevRows[0].total_balance) : 0;
+
+    // 3. Sequentially update each row to ensure the chain is perfect
+    for (const row of rows) {
+        const todaysBill = parseFloat(row.todays_bill_amount) || 0;
+        const cash = parseFloat(row.cash_collected) || 0;
+        const upi = parseFloat(row.upi_collected) || 0;
+        const cheque = parseFloat(row.cheque_collected) || 0;
+        const adj = parseFloat(row.manual_adjustments) || 0;
+        
+        const newOldBal = runningBalance;
+        const newTotalBal = newOldBal + todaysBill - (cash + upi + cheque) + adj;
+
+        await connection.query(`
+            UPDATE daily_collections 
+            SET old_balance = ?, total_balance = ? 
+            WHERE id = ?
+        `, [newOldBal, newTotalBal, row.id]);
+
+        runningBalance = newTotalBal;
+    }
+
+    // 4. Update the live shop balance to match the latest calculated total
+    await connection.query(`
+        UPDATE shop_balances SET balance = ? WHERE shop_id = ?
+    `, [runningBalance, shopId]);
+
+    // Also update the shops table if it has a balance column
+    await connection.query(`
+        UPDATE shops SET balance = ? WHERE id = ?
+    `, [runningBalance, shopId]);
+}
+

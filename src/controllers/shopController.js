@@ -704,7 +704,7 @@ const approveTransaction = async (req, res) => {
         const txDate = dateRows[0].tx_date;
 
         if (isPayment) {
-            const payMethod = (tx.payment_method || 'Cash').toLowerCase();
+            const payMethod = (tx.payment_mode || 'Cash').toLowerCase();
             const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
                 payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
 

@@ -109,12 +109,12 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             LEFT JOIN (
                 SELECT 
                     shop_id,
-                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'CASH' THEN ABS(amount) ELSE 0 END) as m_cash,
-                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
-                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
-                    SUM(CASE WHEN amount > 0 AND transaction_category = 'MANUAL_ADJUST' THEN amount ELSE 0 END) as m_pos
+                    SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CASH' THEN ABS(amount) ELSE 0 END) as m_cash,
+                    SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
+                    SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
+                    SUM(CASE WHEN amount > 0 AND type = 'Adjustment' THEN amount ELSE 0 END) as m_pos
                 FROM shop_transactions
-                WHERE approval_status = 'APPROVED' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                WHERE approval_status = 'APPROVED' AND DATE(transaction_date) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
             LEFT JOIN (
@@ -131,12 +131,12 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                         )
                     ) as pending_json
                 FROM shop_transactions
-                WHERE approval_status = 'PENDING' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                WHERE approval_status = 'PENDING'
                 GROUP BY shop_id
             ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, date, olId]);
+        `, [date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

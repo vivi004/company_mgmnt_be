@@ -558,6 +558,10 @@ const adjustBalance = async (req, res) => {
 
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
+
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+
         const newBalance = currentBalance + adjAmount;
 
         if (newBalance < 0) {

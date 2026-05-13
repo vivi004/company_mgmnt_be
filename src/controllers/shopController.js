@@ -50,35 +50,6 @@ const getAllShops = async (req, res) => {
     }
 };
 
-// GET a single shop by ID
-const getShopById = async (req, res) => {
-    const { id } = req.params;
-    console.log(`[SHOP_DEBUG] Fetching shop details for ID: ${id}`);
-    try {
-        const [shops] = await db.query(
-            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
-                    COALESCE(sb.balance, 0) as balance, s.created_at,
-                    ol.name AS ol_village_name, ol.area_name
-             FROM shops s
-             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
-             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
-             WHERE s.id = ?`,
-            [id]
-        );
-        
-        if (shops.length === 0) {
-            console.warn(`[SHOP_DEBUG] No shop found for ID: ${id}`);
-            return res.status(404).json({ error: 'Shop not found' });
-        }
-        
-        console.log(`[SHOP_DEBUG] Found shop: ${shops[0].shop_name}`);
-        res.json(shops[0]);
-    } catch (err) {
-        console.error('[SHOP_DEBUG] getShopById error:', err);
-        res.status(500).json({ error: 'Failed to fetch shop details' });
-    }
-};
-
 // CREATE a shop
 const createShop = async (req, res) => {
     const errors = validationResult(req);
@@ -657,7 +628,6 @@ const adjustBalance = async (req, res) => {
 module.exports = { 
     getShopsByOrderLine, 
     getAllShops, 
-    getShopById,
     createShop, 
     updateShop, 
     deleteShop,

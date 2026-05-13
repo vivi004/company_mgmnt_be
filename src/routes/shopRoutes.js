@@ -15,7 +15,6 @@ const updateValidation = [
 
 router.get('/', authMiddleware, shopController.getAllShops);
 router.get('/by-village/:order_line_id', authMiddleware, shopController.getShopsByOrderLine);
-router.get('/:id', authMiddleware, shopController.getShopById);
 router.post('/', authMiddleware, shopValidation, shopController.createShop);
 router.put('/:id', authMiddleware, updateValidation, shopController.updateShop);
 router.delete('/:id', authMiddleware, shopController.deleteShop);

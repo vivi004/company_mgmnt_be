@@ -28,6 +28,7 @@ const settingsRoutes = require('./routes/settingsRoutes');
 const billRoutes = require('./routes/billRoutes');
 const productRoutes = require('./routes/productRoutes');
 const collectionRoutes = require('./routes/collectionRoutes');
+const { startScheduler } = require('./services/schedulerService');
 
 app.use('/api/employees', employeeRoutes);
 app.use('/api/auth', authRoutes);
@@ -144,10 +145,27 @@ app.listen(PORT, async () => {
             )
         `);
 
+        // Ensure daily_collections has all required columns
+        const dcColumns = [
+            { name: 'future_bills', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
+            { name: 'manual_adjustments', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
+        ];
+        for (const col of dcColumns) {
+            try {
+                await db.query(`ALTER TABLE daily_collections ADD COLUMN ${col.name} ${col.type}`);
+                console.log(`Column '${col.name}' added to daily_collections.`);
+            } catch (e) {
+                // Column already exists, skip
+            }
+        }
+
         console.log('Database tables verified/initialized.');
     } catch (err) {
         console.error('Database initialization warning:', err.message);
     }
+
+    // Start midnight IST rollover scheduler
+    startScheduler();
     
     console.log('Press Ctrl+C to stop');
 });

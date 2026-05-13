@@ -15,7 +15,7 @@ const getShopsByOrderLine = async (req, res) => {
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
                         WHERE b.shop_id = s.id
-                        AND DATE(b.created_at) = CURDATE()
+                        AND DATE(CONVERT_TZ(b.created_at, '+00:00', '+05:30')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:30'))
                     ) AS UNSIGNED) as has_order_today
              FROM shops s 
              LEFT JOIN shop_balances sb ON s.id = sb.shop_id
@@ -381,9 +381,10 @@ const collectPayment = async (req, res) => {
             [id, todayIST]
         );
         
-        // If row exists, activeDebt = total - future. 
-        // If not, it means no transactions today yet, so current shop balance is the active debt.
-        const activeDebt = collRows.length > 0 ? (collRows[0].total_balance - collRows[0].future_bills) : currentBalance;
+        // ── PAYMENT SHIELD: total_balance now already excludes future_bills ──
+        // activeDebt = total_balance (which is: old_balance + todays_bill - collected + manual_adj)
+        // If no row exists yet today, use current shop balance as active debt.
+        const activeDebt = collRows.length > 0 ? parseFloat(collRows[0].total_balance) : currentBalance;
 
         if (payAmount > activeDebt + 0.01) {
             return res.status(400).json({ 
@@ -424,24 +425,24 @@ const collectPayment = async (req, res) => {
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance,
+                     future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                 ON DUPLICATE KEY UPDATE
                     cash_collected = cash_collected + VALUES(cash_collected),
                     upi_collected = upi_collected + VALUES(upi_collected),
                     cheque_collected = cheque_collected + VALUES(cheque_collected),
-                    total_balance = VALUES(total_balance)
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
 
             // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
-            // This updates both the starting balance (old_balance) and ending balance (total_balance)
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
-                    total_balance = total_balance + ? 
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                 WHERE shop_id = ? AND collection_date > ?
-            `, [delta, delta, id, todayIST]);
+            `, [delta, id, todayIST]);
         } else {
             // Fallback to single mode detection
             const payMethod = (payment_method || 'Cash').toLowerCase();
@@ -451,11 +452,11 @@ const collectPayment = async (req, res) => {
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     ${columnToUpdate}, old_balance, total_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     ${columnToUpdate}, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                 ON DUPLICATE KEY UPDATE
                     ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
-                    total_balance = VALUES(total_balance)
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
 
@@ -463,9 +464,9 @@ const collectPayment = async (req, res) => {
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
-                    total_balance = total_balance + ? 
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                 WHERE shop_id = ? AND collection_date > ?
-            `, [delta, delta, id, todayIST]);
+            `, [delta, id, todayIST]);
         }
 
         await connection.commit();
@@ -566,7 +567,8 @@ const adjustBalance = async (req, res) => {
             [id, todayIST]
         );
         
-        const activeDebt = collRows.length > 0 ? (collRows[0].total_balance - collRows[0].future_bills) : currentBalance;
+        // ── ADJUSTMENT SHIELD: total_balance now already excludes future_bills ──
+        const activeDebt = collRows.length > 0 ? parseFloat(collRows[0].total_balance) : currentBalance;
 
         // If trying to subtract (discount) more than what is active
         if (adjAmount < 0 && Math.abs(adjAmount) > activeDebt + 0.01) {
@@ -602,20 +604,20 @@ const adjustBalance = async (req, res) => {
         await connection.query(`
             INSERT INTO daily_collections
                 (shop_id, shop_name, village_name, order_line_id, collection_date,
-                 manual_adjustments, old_balance, total_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 manual_adjustments, old_balance, total_balance, future_bills)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON DUPLICATE KEY UPDATE
                 manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
-                total_balance = VALUES(total_balance)
+                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
         `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), dashboardBalance]);
 
         // SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
         await connection.query(`
             UPDATE daily_collections 
             SET old_balance = old_balance + ?, 
-                total_balance = total_balance + ? 
+                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
             WHERE shop_id = ? AND collection_date > ?
-        `, [adjAmount, adjAmount, id, todayIST]);
+        `, [adjAmount, id, todayIST]);
 
         await connection.commit();
 

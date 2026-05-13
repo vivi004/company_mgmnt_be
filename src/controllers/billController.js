@@ -144,15 +144,25 @@ exports.createBill = async (req, res) => {
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
         const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : todayStr;
-        const shouldApplyNow = true; // Always apply balance immediately as per request
+        const isFutureBill = deliveryDateOnly > todayStr;
 
+        // ── BALANCE APPLICATION ──
+        // Future-dated bills: do NOT apply to shop_balances immediately.
+        // They will be applied by the midnight cron on delivery date.
         let finalBalance = parseFloat(shop.balance);
-        finalBalance += amount;
-        await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, finalBalance]);
-        
+        let isAppliedNow = 0;
+        if (!isFutureBill) {
+            finalBalance += amount;
+            isAppliedNow = 1;
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [shop.id, finalBalance]
+            );
+        }
+
         const [billResult] = await connection.query(
             'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, 1]
+            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, isAppliedNow]
         );
 
         // 7. Create Shop Transaction (Ledger Entry)
@@ -168,47 +178,49 @@ exports.createBill = async (req, res) => {
         );
 
         // 8b. Update daily_collections
-        const rawCollDate = mysqlDeliveryDate || mysqlDate;
-        const collectionDateStr = rawCollDate.split(' ')[0];
         const shopOrderLineId = shop.order_line_id;
 
-        // A. Update the row for the ACTUAL bill date
-        await connection.query(`
-            INSERT INTO daily_collections 
-                (shop_id, shop_name, village_name, order_line_id, collection_date, 
-                 todays_bill_amount, old_balance, total_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE 
-                todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                total_balance = VALUES(total_balance)
-        `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId, collectionDateStr, 
-            amount, parseFloat(shop.balance), finalBalance]);
-
-        // B. If the bill is NOT for today, we must update TODAY's total_balance too
-        if (collectionDateStr !== todayStr) {
-            const isFuture = collectionDateStr > todayStr;
-            const columnToUpdate = isFuture ? 'future_bills' : 'old_balance'; // Past bills become part of old_balance
-
+        if (isFutureBill) {
+            // ── CASE A: FUTURE BILL (Deferred) ──
+            // 1. Add to the future delivery date row
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     ${isFuture ? 'future_bills' : 'old_balance'}, total_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0)
                 ON DUPLICATE KEY UPDATE
-                    ${isFuture ? 'future_bills' : 'old_balance'} = ${isFuture ? 'future_bills' : 'old_balance'} + VALUES(${isFuture ? 'future_bills' : 'old_balance'}),
-                    total_balance = VALUES(total_balance)
-            `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId, todayStr,
-                amount, finalBalance]);
-        }
+                    todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId,
+                deliveryDateOnly, amount, amount]);
 
-        // C. SMART PROPAGATION: Ripple the bill amount to all FUTURE rows
-        // This updates both the starting balance (old_balance) and ending balance (total_balance)
-        await connection.query(`
-            UPDATE daily_collections 
-            SET old_balance = old_balance + ?, 
-                total_balance = total_balance + ? 
-            WHERE shop_id = ? AND collection_date > ?
-        `, [amount, amount, shop.id, todayStr]);
+            // 2. Update Today's row informational column (future_bills) — NOT total_balance
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     future_bills, old_balance, total_balance, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON DUPLICATE KEY UPDATE
+                    future_bills = future_bills + VALUES(future_bills)
+            `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId,
+                todayStr, amount, parseFloat(shop.balance), parseFloat(shop.balance)]);
+        } else {
+            // ── CASE B: TODAY OR BACKDATED BILL (Immediate) ──
+            // 1. Update the row for the ACTUAL delivery date
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON DUPLICATE KEY UPDATE
+                    todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId,
+                deliveryDateOnly, amount, parseFloat(shop.balance) - amount, finalBalance]);
+
+            // 2. MASTER SYNC: Heal the ledger starting from the delivery date
+            await recalculateShopLedger(connection, shop.id, deliveryDateOnly);
+        }
 
         await connection.commit();
 
@@ -380,45 +392,37 @@ exports.deleteBill = async (req, res) => {
             const delDateStr = bill.delivery_date_str || bill.bill_date_str;
             const [todayRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
             const todayStr = todayRows[0].today;
+            const isFutureBill = delDateStr > todayStr;
 
-            // Update the row for the ACTUAL bill date
-            await connection.query(`
-                UPDATE daily_collections
-                SET todays_bill_amount = todays_bill_amount - ?,
-                    total_balance = total_balance - ?
-                WHERE shop_id = ? AND collection_date = ?
-            `, [amount, amount, shop.id, delDateStr]);
-
-            // If the deleted bill was NOT for today, update today's total_balance too
-            if (delDateStr !== todayStr) {
-                const isFuture = delDateStr > todayStr;
-                const columnToUpdate = isFuture ? 'future_bills' : 'old_balance';
-
+            if (isFutureBill) {
+                // Future bill deleted: remove from delivery date row and subtract from today's future_bills
                 await connection.query(`
-                    INSERT INTO daily_collections
-                        (shop_id, shop_name, village_name, order_line_id, collection_date,
-                         ${columnToUpdate}, total_balance)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON DUPLICATE KEY UPDATE
-                        ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
-                        total_balance = VALUES(total_balance)
-                `, [shop.id, shop.shop_name, shop.village_name, shop.order_line_id, todayStr,
-                    -amount, newBalance]);
-            } else {
-                // Just update today's total balance if it was today
-                await connection.query(`
-                    UPDATE daily_collections SET total_balance = ?
+                    UPDATE daily_collections
+                    SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
+                        total_balance = old_balance + GREATEST(0, todays_bill_amount - ?) - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                     WHERE shop_id = ? AND collection_date = ?
-                `, [newBalance, shop.id, todayStr]);
-            }
+                `, [amount, amount, shop.id, delDateStr]);
 
-            // SMART PROPAGATION: Ripple the delta (-amount) to all FUTURE rows
-            await connection.query(`
-                UPDATE daily_collections 
-                SET old_balance = old_balance + ?, 
-                    total_balance = total_balance + ? 
-                WHERE shop_id = ? AND collection_date > ?
-            `, [-amount, -amount, shop.id, todayStr]);
+                // Reduce today's future_bills column — total_balance is NOT affected
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET future_bills = GREATEST(0, future_bills - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [amount, shop.id, todayStr]);
+            } else {
+                // Today's or past bill deleted: remove from its date row
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
+                        total_balance = GREATEST(0, total_balance - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [amount, amount, shop.id, delDateStr]);
+
+                // MASTER SYNC: Heal the ledger starting from the delivery date
+                if (bill.is_applied_to_balance) {
+                    await recalculateShopLedger(connection, shop.id, delDateStr);
+                }
+            }
         }
 
         // 6. Delete the bill
@@ -530,35 +534,61 @@ exports.updateBill = async (req, res) => {
         if (collShop) {
             const oldDateStr = bill.delivery_date_str || bill.bill_date_str;
             const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
+            const [todayDateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+            const todayStrUpd = todayDateRows[0].today;
 
             if (oldDateStr !== newDateStr) {
-                // Date changed: Move amount from old date to new date
+                // Date changed: remove from old date row
                 await connection.query(`
                     UPDATE daily_collections
-                    SET todays_bill_amount = todays_bill_amount - ?,
-                        total_balance = total_balance - ?
+                    SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
+                        total_balance = old_balance + GREATEST(0, todays_bill_amount - ?) - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                     WHERE shop_id = ? AND collection_date = ?
                 `, [oldAmount, oldAmount, collShop.id, oldDateStr]);
 
+                // Add to new date row
                 await connection.query(`
                     INSERT INTO daily_collections
                         (shop_id, shop_name, village_name, order_line_id, collection_date,
-                         todays_bill_amount, old_balance, total_balance)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                     ON DUPLICATE KEY UPDATE
                         todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                        total_balance = VALUES(total_balance)
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                 `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr,
                     newAmount, parseFloat(collShop.balance), parseFloat(collShop.balance) + newAmount]);
+
+                // If old date was future, also clean up today's future_bills
+                if (oldDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = GREATEST(0, future_bills - ?)
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [oldAmount, collShop.id, todayStrUpd]);
+                }
+                // If new date is future, add to today's future_bills
+                if (newDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = future_bills + ?
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [newAmount, collShop.id, todayStrUpd]);
+                }
+
+                // MASTER SYNC: Heal the ledger starting from the earliest changed date
+                const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
+                await recalculateShopLedger(connection, collShop.id, earliestDate);
             } else if (diff !== 0) {
-                // Same date, just update difference
-                const finalBalance = parseFloat(collShop.balance) + diff;
+                // Same date, just update amount difference
                 await connection.query(`
                     UPDATE daily_collections
                     SET todays_bill_amount = todays_bill_amount + ?,
-                        total_balance = ?
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                     WHERE shop_id = ? AND collection_date = ?
-                `, [diff, finalBalance, collShop.id, newDateStr]);
+                `, [diff, collShop.id, newDateStr]);
+
+                // MASTER SYNC: Heal the ledger starting from the bill date
+                await recalculateShopLedger(connection, collShop.id, newDateStr);
             }
         }
 

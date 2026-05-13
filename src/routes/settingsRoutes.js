@@ -13,5 +13,6 @@ router.delete('/vehicles/:id', settingsController.deleteMotorVehicle);
 
 // Global Session Management
 router.post('/logout-all', authMiddleware, authMiddleware.authorizeRole('admin'), settingsController.logoutAllStaff);
+router.post('/reset-database', authMiddleware, authMiddleware.authorizeRole('admin'), settingsController.resetDatabase);
 
 module.exports = router;

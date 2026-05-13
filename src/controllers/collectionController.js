@@ -59,13 +59,57 @@ exports.getCollectionsByOrderLine = async (req, res) => {
     }
 
     try {
+        // This robust query fetches ALL shops for the order line.
+        // For each shop, it finds the actual row in daily_collections for the selected date.
+        // If NO row exists for that date, it dynamically finds the most recent total_balance before that date
+        // and uses it as the 'old_balance' (PREV BAL).
         const [rows] = await db.query(`
-            SELECT dc.*, ol.name AS order_line_name, ol.node_id
-            FROM daily_collections dc
-            JOIN order_lines ol ON dc.order_line_id = ol.id
-            WHERE dc.order_line_id = ? AND dc.collection_date = ?
-            ORDER BY dc.shop_name ASC
-        `, [olId, date]);
+            SELECT 
+                s.id AS shop_id,
+                s.shop_name,
+                s.village_name,
+                s.order_line_id,
+                ? AS collection_date,
+                ol.name AS order_line_name,
+                ol.node_id,
+                COALESCE(dc.todays_bill_amount, 0) AS todays_bill_amount,
+                COALESCE(dc.cash_collected, 0) AS cash_collected,
+                COALESCE(dc.upi_collected, 0) AS upi_collected,
+                COALESCE(dc.cheque_collected, 0) AS cheque_collected,
+                COALESCE(dc.future_bills, 0) AS future_bills,
+                COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
+                
+                -- The PREV BAL logic: 
+                -- If a record exists for today, use its old_balance.
+                -- Otherwise, find the most recent total_balance before this date.
+                -- NEVER fallback to sb.balance for historical accuracy.
+                COALESCE(
+                    dc.old_balance, 
+                    COALESCE(prev.total_balance, 0)
+                ) AS old_balance,
+
+                -- The TOTAL BAL logic:
+                -- Always calculate based on the PREV BAL (old_balance) to ensure math consistency.
+                COALESCE(
+                    dc.total_balance,
+                    COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
+                ) AS total_balance
+            FROM shops s
+            JOIN order_lines ol ON s.order_line_id = ol.id
+            LEFT JOIN daily_collections dc ON s.id = dc.shop_id AND dc.collection_date = ?
+            LEFT JOIN (
+                SELECT dc1.shop_id, dc1.total_balance
+                FROM daily_collections dc1
+                INNER JOIN (
+                    SELECT shop_id, MAX(collection_date) as max_date
+                    FROM daily_collections
+                    WHERE collection_date < ?
+                    GROUP BY shop_id
+                ) dc2 ON dc1.shop_id = dc2.shop_id AND dc1.collection_date = dc2.max_date
+            ) prev ON s.id = prev.shop_id
+            WHERE s.order_line_id = ?
+            ORDER BY s.shop_name ASC
+        `, [date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

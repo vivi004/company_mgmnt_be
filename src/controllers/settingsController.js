@@ -162,3 +162,59 @@ exports.logoutAllStaff = async (req, res) => {
         res.status(500).json({ error: 'Failed to revoke staff sessions' });
     }
 };
+// POST /api/settings/reset-database
+exports.resetDatabase = async (req, res) => {
+    let connection;
+    try {
+        console.warn(`[ADMIN] DATABASE RESET INITIATED BY USER: ${req.user.id}, ROLE: ${req.user.role}`);
+        
+        connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Tables to clear
+        const tablesToWipe = [
+            'bills',
+            'daily_collections',
+            'daily_expenses',
+            'shop_balances',
+            'shop_transactions'
+        ];
+
+        console.log('[ADMIN] Wiping tables:', tablesToWipe.join(', '));
+
+        for (const table of tablesToWipe) {
+            try {
+                await connection.query(`DELETE FROM ${table}`);
+                console.log(`[ADMIN] Table ${table} cleared.`);
+            } catch (tableErr) {
+                console.error(`[ADMIN] Error clearing table ${table}:`, tableErr.message);
+                // Continue if table doesn't exist, but we checked earlier they do
+            }
+        }
+
+        // 2. Reset shop_balances to 0 in the shops table
+        console.log('[ADMIN] Resetting shop balances in shops table...');
+        await connection.query('UPDATE shops SET balance = 0.00');
+
+        // 3. Reset app_settings invoice counters
+        console.log('[ADMIN] Resetting invoice counters...');
+        await connection.query('UPDATE app_settings SET next_invoice_no = 1001, last_invoice_no = 1000 WHERE id = 1');
+
+        await connection.commit();
+        console.log('[ADMIN] Database reset successfully completed');
+        
+        res.json({ 
+            success: true,
+            message: 'Database transaction data reset successfully' 
+        });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        console.error('CRITICAL: Error in resetDatabase:', err);
+        res.status(500).json({ 
+            success: false,
+            error: err.message || 'Failed to reset database data' 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+};

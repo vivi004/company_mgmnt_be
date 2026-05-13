@@ -369,9 +369,12 @@ exports.deleteBill = async (req, res) => {
                 await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
                 
                 // 4. Create "Cancellation" Ledger Entry
+                const istTime = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+                const mysqlDate = istTime.toISOString().slice(0, 19).replace('T', ' ');
+
                 await connection.query(
-                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName]
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName, mysqlDate]
                 );
             }
 

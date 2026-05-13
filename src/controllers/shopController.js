@@ -50,6 +50,28 @@ const getAllShops = async (req, res) => {
     }
 };
 
+// GET a single shop by ID
+const getShopById = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [shops] = await db.query(
+            `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
+                    COALESCE(sb.balance, 0) as balance, s.created_at,
+                    ol.name AS ol_village_name, ol.area_name
+             FROM shops s
+             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+             JOIN order_lines ol ON s.order_line_id = ol.id
+             WHERE s.id = ?`,
+            [id]
+        );
+        if (shops.length === 0) return res.status(404).json({ error: 'Shop not found' });
+        res.json(shops[0]);
+    } catch (err) {
+        console.error('getShopById error:', err);
+        res.status(500).json({ error: 'Failed to fetch shop details' });
+    }
+};
+
 // CREATE a shop
 const createShop = async (req, res) => {
     const errors = validationResult(req);
@@ -628,6 +650,7 @@ const adjustBalance = async (req, res) => {
 module.exports = { 
     getShopsByOrderLine, 
     getAllShops, 
+    getShopById,
     createShop, 
     updateShop, 
     deleteShop,

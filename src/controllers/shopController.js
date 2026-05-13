@@ -2,8 +2,6 @@ const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 
-
-
 // GET all shops for a specific order_line (village)
 const getShopsByOrderLine = async (req, res) => {
     const { order_line_id } = req.params;
@@ -60,7 +58,6 @@ const createShop = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Safety check: If created_by is missing, fetch the acting user's name from the DB
         if (!created_by && req.user && req.user.id) {
             const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
             if (users.length > 0) {
@@ -70,14 +67,12 @@ const createShop = async (req, res) => {
 
         const startBalance = parseFloat(balance) || 0;
         
-        // 1. Insert into shops
         const [result] = await connection.query(
             `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2) VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '']
         );
         const shopId = result.insertId;
 
-        // 2. Insert into shop_balances
         await connection.query(
             'INSERT INTO shop_balances (shop_id, balance, opening_balance) VALUES (?, ?, ?)',
             [shopId, startBalance, startBalance]
@@ -85,7 +80,6 @@ const createShop = async (req, res) => {
 
         await connection.commit();
 
-        // Push "Opening Balance" to Webhook
         webhookService.sendTransactionToWebhook({
             shop_id: shopId,
             shop_name: shop_name,
@@ -120,7 +114,6 @@ const updateShop = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Fetch current shop and balance
         const [oldShops] = await connection.query(`
             SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id 
             FROM shops s
@@ -137,20 +130,16 @@ const updateShop = async (req, res) => {
         const oldBalance = parseFloat(oldShop.balance);
         const newBalance = balance !== undefined ? parseFloat(balance) : oldBalance;
 
-        // 1. Update shops table (excluding balance)
         await connection.query(
             `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ? WHERE id = ?`,
             [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, id]
         );
 
-        // 2. Update shop_balances table
         await connection.query(
             'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
             [id, newBalance]
         );
 
-        // 2. If name or village changed, update ALL related bills to prevent orphans
-        // We now have shop_id, so we update by ID which is 100% reliable
         if (oldShop.shop_name !== shop_name || oldShop.village_name !== village_name) {
             await connection.query(
                 'UPDATE bills SET shop_name = ?, village_name = ? WHERE shop_id = ?',
@@ -158,7 +147,6 @@ const updateShop = async (req, res) => {
             );
         }
 
-        // 3. If balance was changed manually, log it
         if (oldBalance !== newBalance) {
             let actingUserName = 'Admin';
             if (req.user && req.user.id) {
@@ -174,11 +162,9 @@ const updateShop = async (req, res) => {
                 [id, 'Adjustment', newBalance - oldBalance, 'Manual Balance Update (Edit Shop)', newBalance, actingUserName, mysqlDate]
             );
 
-            // Update daily_collections for this manual edit
             const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
             const todayIST = dateRows[0].today;
 
-            // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
             const [futureRows] = await connection.query(
                 "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
                 [id, todayIST + ' 23:59:59']
@@ -193,7 +179,7 @@ const updateShop = async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     total_balance = VALUES(total_balance)
-            `, [id, shop_name, village_name || '', oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
+            `, [id, shop_name, village_name || '', req.body.order_line_id || oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
 
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
@@ -227,7 +213,6 @@ const deleteShop = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Fetch details before deletion for the log
         const [shops] = await connection.query(`
             SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance 
             FROM shops s
@@ -242,12 +227,13 @@ const deleteShop = async (req, res) => {
         
         const shop = shops[0];
 
-        // 2. Log deletion to Webhook (Background)
         let actingUserName = 'Admin';
         try {
-            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
-            if (users.length > 0) {
-                actingUserName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            if (req.user && req.user.id) {
+                const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+                if (users.length > 0) {
+                    actingUserName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+                }
             }
         } catch (e) {
             console.error('Failed to fetch user name for shop deletion:', e);
@@ -266,12 +252,9 @@ const deleteShop = async (req, res) => {
             created_by: actingUserName
         });
 
-        // 3. Delete related records
         await connection.query('DELETE FROM shop_transactions WHERE shop_id = ?', [id]);
         await connection.query('DELETE FROM bills WHERE shop_id = ?', [id]);
         await connection.query('DELETE FROM shop_balances WHERE shop_id = ?', [id]);
-
-        // 4. Finally delete the shop
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);
 
         await connection.commit();
@@ -294,7 +277,6 @@ const syncAllShopsToLedger = async (req, res) => {
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
         `);
         
-        // Split into batches of 100 to prevent timeouts
         const BATCH_SIZE = 100;
         for (let i = 0; i < shops.length; i += BATCH_SIZE) {
             const batch = shops.slice(i, i + BATCH_SIZE);
@@ -312,9 +294,7 @@ const syncAllShopsToLedger = async (req, res) => {
                 timestamp: new Date()
             }));
 
-            // Send this batch
             await webhookService.sendTransactionToWebhook(bulkData);
-            console.log(`Synced batch ${Math.floor(i/BATCH_SIZE) + 1} of ${Math.ceil(shops.length/BATCH_SIZE)}`);
         }
         
         res.json({ message: `Successfully pushed ${shops.length} shops to ledger in batches.` });
@@ -324,12 +304,11 @@ const syncAllShopsToLedger = async (req, res) => {
     }
 };
 
-// POST Collect Payment
+// FINANCIAL ACTIONS
 const collectPayment = async (req, res) => {
     const { id } = req.params;
-    let { amount, payment_method, description, created_by } = req.body;
+    let { amount, payment_method, description, created_by, cash_amount, upi_amount, cheque_amount } = req.body;
 
-    // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
         try {
             const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
@@ -345,7 +324,6 @@ const collectPayment = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Get current shop and balance
         const [shops] = await connection.query(`
             SELECT s.id, s.shop_name, s.village_name, s.order_line_id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
             FROM shops s
@@ -359,7 +337,6 @@ const collectPayment = async (req, res) => {
         }
         const shop = shops[0];
 
-        // Self-Healing: If order_line_id is missing...
         let shopOrderLineId = shop.order_line_id;
         if (!shopOrderLineId) {
             const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
@@ -373,17 +350,17 @@ const collectPayment = async (req, res) => {
         const payAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
 
-        // ── PAYMENT SHIELD: Calculate Active Debt (Total - Future) ──
+        const payMethodLower = (payment_method || 'Cash').toLowerCase();
+        const requiresVerification = payMethodLower.includes('upi') || payMethodLower.includes('cheque') || payMethodLower.includes('gpay') || payMethodLower.includes('phonepe') || payMethodLower.includes('paytm');
+        const is_verified = requiresVerification ? 0 : 1;
+
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
+        
         const [collRows] = await connection.query(
-            "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
+            "SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
             [id, todayIST]
         );
-        
-        // ── PAYMENT SHIELD: total_balance now already excludes future_bills ──
-        // activeDebt = total_balance (which is: old_balance + todays_bill - collected + manual_adj)
-        // If no row exists yet today, use current shop balance as active debt.
         const activeDebt = collRows.length > 0 ? parseFloat(collRows[0].total_balance) : currentBalance;
 
         if (payAmount > activeDebt + 0.01) {
@@ -392,32 +369,23 @@ const collectPayment = async (req, res) => {
             });
         }
 
-        const newBalance = currentBalance - payAmount;
-        const delta = -payAmount; // The change to ripple forward
+        const newBalance = is_verified ? currentBalance - payAmount : currentBalance;
+        const delta = is_verified ? -payAmount : 0;
 
-        // 2. Update shop_balances
-        await connection.query(
-            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-            [id, newBalance]
-        );
+        if (is_verified) {
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [id, newBalance]
+            );
+        }
 
         const mysqlDate = new Date();
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
+            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate, is_verified]
         );
 
-        // Update daily_collections for this payment
-        const { cash_amount, upi_amount, cheque_amount } = req.body;
-        const payMethod = (payment_method || 'Cash').toLowerCase();
-        
-
-
-        // Use actual balance for total_balance column
-        const dashboardBalance = newBalance;
-
         if (cash_amount !== undefined || upi_amount !== undefined || cheque_amount !== undefined) {
-            // Precise split amounts provided
             const c = parseFloat(cash_amount) || 0;
             const u = parseFloat(upi_amount) || 0;
             const q = parseFloat(cheque_amount) || 0;
@@ -425,53 +393,37 @@ const collectPayment = async (req, res) => {
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance,
-                     future_bills, manual_adjustments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     cash_collected = cash_collected + VALUES(cash_collected),
                     upi_collected = upi_collected + VALUES(upi_collected),
                     cheque_collected = cheque_collected + VALUES(cheque_collected),
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
-                todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
-
-            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
-            await connection.query(`
-                UPDATE daily_collections 
-                SET old_balance = old_balance + ?, 
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-                WHERE shop_id = ? AND collection_date > ?
-            `, [delta, id, todayIST]);
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, c, u, q, parseFloat(shop.balance), newBalance]);
         } else {
-            // Fallback to single mode detection
-            const payMethod = (payment_method || 'Cash').toLowerCase();
-            const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
-                payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
-
+            const columnToUpdate = requiresVerification ? (payMethodLower.includes('upi') ? 'upi_collected' : 'cheque_collected') : 'cash_collected';
             await connection.query(`
                 INSERT INTO daily_collections
                     (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     ${columnToUpdate}, old_balance, total_balance, future_bills, manual_adjustments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                     ${columnToUpdate}, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
-                todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, payAmount, parseFloat(shop.balance), newBalance]);
+        }
 
-            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
+        if (delta !== 0) {
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                    total_balance = total_balance + ?
                 WHERE shop_id = ? AND collection_date > ?
-            `, [delta, id, todayIST]);
+            `, [delta, delta, id, todayIST]);
         }
 
         await connection.commit();
-
-        // Push to Webhook
         webhookService.sendTransactionToWebhook({
             shop_id: id,
             shop_name: shop.shop_name,
@@ -481,20 +433,20 @@ const collectPayment = async (req, res) => {
             amount: -payAmount,
             payment_method: payment_method || 'Cash',
             description: description || 'Payment Received',
-            balance_before: parseFloat(shop.balance) || 0,
+            balance_before: currentBalance,
             balance_after: newBalance,
             created_by: created_by || 'Staff'
         });
-        res.json({ message: 'Payment recorded successfully', new_balance: newBalance });
+        res.json({ message: 'Payment recorded successfully', new_balance: newBalance, is_verified });
     } catch (err) {
         if (connection) await connection.rollback();
+        console.error('collectPayment error:', err);
         res.status(500).json({ error: err.message });
     } finally {
         if (connection) connection.release();
     }
 };
 
-// GET Shop Ledger
 const getShopLedger = async (req, res) => {
     const { id } = req.params;
     const limit = parseInt(req.query.limit) || 20;
@@ -510,12 +462,10 @@ const getShopLedger = async (req, res) => {
     }
 };
 
-// POST Adjust Balance (Admin only)
 const adjustBalance = async (req, res) => {
     const { id } = req.params;
-    let { amount, type, description, created_by, payment_method } = req.body; // type: 'Adjustment'
+    let { amount, description, created_by, payment_method } = req.body;
 
-    // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
         try {
             const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
@@ -531,7 +481,6 @@ const adjustBalance = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Get current shop and balance
         const [shops] = await connection.query(`
             SELECT s.id, s.shop_name, s.village_name, s.order_line_id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
             FROM shops s
@@ -545,7 +494,6 @@ const adjustBalance = async (req, res) => {
         }
         const shop = shops[0];
 
-        // Self-Healing...
         let shopOrderLineId = shop.order_line_id;
         if (!shopOrderLineId) {
             const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
@@ -554,54 +502,52 @@ const adjustBalance = async (req, res) => {
                 await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
             }
         }
-        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line.");
 
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
 
+        const payMethodLower = (payment_method || '').toLowerCase();
+        const requiresVerification = payMethodLower.includes('upi') || payMethodLower.includes('cheque') || payMethodLower.includes('gpay') || payMethodLower.includes('phonepe') || payMethodLower.includes('paytm');
+        const is_verified = requiresVerification ? 0 : 1;
+
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
 
-        const newBalance = currentBalance + adjAmount;
+        const newBalance = is_verified ? currentBalance + adjAmount : currentBalance;
 
-        if (newBalance < 0) {
-            throw new Error(`Resulting balance would be negative (₹${newBalance.toLocaleString('en-IN')}), adjustment cancelled`);
+        if (is_verified) {
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [id, newBalance]
+            );
         }
-
-        // 2. Update shop_balances
-        await connection.query(
-            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-            [id, newBalance]
-        );
 
         const mysqlDate = new Date();
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Adjustment', adjAmount, payment_method || null, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
+            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Adjustment', adjAmount, payment_method || null, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate, is_verified]
         );
 
-        // 3. Update daily_collections
-        await connection.query(`
-            INSERT INTO daily_collections
-                (shop_id, shop_name, village_name, order_line_id, collection_date,
-                 manual_adjustments, old_balance, total_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-                manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), newBalance]);
+        if (is_verified) {
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     manual_adjustments, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), newBalance]);
 
-        // 4. SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
-        await connection.query(`
-            UPDATE daily_collections 
-            SET old_balance = old_balance + ?, 
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            WHERE shop_id = ? AND collection_date > ?
-        `, [adjAmount, id, todayIST]);
+            await connection.query(`
+                UPDATE daily_collections 
+                SET old_balance = old_balance + ?, 
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                WHERE shop_id = ? AND collection_date > ?
+            `, [adjAmount, id, todayIST]);
+        }
 
         await connection.commit();
-
-        // Push to Webhook
         webhookService.sendTransactionToWebhook({
             shop_id: id,
             shop_name: shop.shop_name,
@@ -611,19 +557,85 @@ const adjustBalance = async (req, res) => {
             amount: adjAmount,
             payment_method: payment_method || null,
             description: description || 'Manual Adjustment',
-            balance_before: parseFloat(shop.balance) || 0,
+            balance_before: currentBalance,
             balance_after: newBalance,
             created_by: created_by || 'Admin'
         });
-        res.json({ message: 'Balance adjusted successfully', new_balance: newBalance });
+        res.json({ message: 'Balance adjusted successfully', new_balance: newBalance, is_verified });
     } catch (err) {
         if (connection) await connection.rollback();
+        console.error('adjustBalance error:', err);
         res.status(500).json({ error: err.message });
     } finally {
         if (connection) connection.release();
     }
 };
 
+const verifyTransaction = async (req, res) => {
+    const { id } = req.params; 
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [txs] = await connection.query('SELECT * FROM shop_transactions WHERE id = ? FOR UPDATE', [id]);
+        if (txs.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Transaction not found' });
+        }
+        const tx = txs[0];
+
+        if (tx.is_verified) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'Transaction is already verified' });
+        }
+
+        const [shops] = await connection.query('SELECT balance FROM shop_balances WHERE shop_id = ? FOR UPDATE', [tx.shop_id]);
+        const currentBalance = shops.length > 0 ? parseFloat(shops[0].balance) : 0;
+
+        const amountToDeduct = tx.type === 'Payment' ? tx.amount : (tx.amount < 0 ? Math.abs(tx.amount) : -tx.amount);
+        const newBalance = currentBalance - amountToDeduct;
+
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [tx.shop_id, newBalance]
+        );
+
+        let adminName = 'Admin';
+        if (req.user && req.user.id) {
+            const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) adminName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+        }
+
+        await connection.query(
+            'UPDATE shop_transactions SET is_verified = 1, verified_by = ?, verified_at = NOW(), balance_after = ? WHERE id = ?',
+            [adminName, newBalance, id]
+        );
+
+        const txDate = new Date(tx.transaction_date).toISOString().split('T')[0];
+        
+        await connection.query(`
+            UPDATE daily_collections 
+            SET old_balance = old_balance - ?, 
+                total_balance = total_balance - ?
+            WHERE shop_id = ? AND collection_date > ?
+        `, [amountToDeduct, amountToDeduct, tx.shop_id, txDate]);
+
+        await connection.query(`
+            UPDATE daily_collections 
+            SET total_balance = total_balance - ?
+            WHERE shop_id = ? AND collection_date = ?
+        `, [amountToDeduct, tx.shop_id, txDate]);
+
+        await connection.commit();
+        res.json({ message: 'Transaction verified and balance updated successfully' });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        console.error('verifyTransaction error:', err);
+        res.status(500).json({ error: 'Failed to verify transaction' });
+    } finally {
+        if (connection) connection.release();
+    }
+};
 
 module.exports = { 
     getShopsByOrderLine, 
@@ -634,5 +646,6 @@ module.exports = {
     collectPayment,
     getShopLedger,
     adjustBalance,
-    syncAllShopsToLedger
+    syncAllShopsToLedger,
+    verifyTransaction
 };

@@ -95,7 +95,10 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(
                     dc.total_balance,
                     COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
-                ) AS total_balance
+                ) AS total_balance,
+
+                -- PENDING TRANSACTIONS (Unverified UPI/Cheque)
+                COALESCE(pt.pending_json, '[]') AS pending_transactions
             FROM shops s
             JOIN order_lines ol ON s.order_line_id = ol.id
             LEFT JOIN daily_collections dc ON s.id = dc.shop_id AND dc.collection_date = ?
@@ -120,6 +123,24 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 WHERE type = 'Adjustment' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
+            LEFT JOIN (
+                SELECT 
+                    shop_id,
+                    JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'id', id,
+                            'type', type,
+                            'amount', amount,
+                            'method', payment_method,
+                            'desc', description,
+                            'date', transaction_date,
+                            'by', created_by
+                        )
+                    ) as pending_json
+                FROM shop_transactions
+                WHERE is_verified = 0
+                GROUP BY shop_id
+            ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
         `, [date, date, date, date, olId]);

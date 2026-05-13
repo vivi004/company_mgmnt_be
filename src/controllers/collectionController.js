@@ -59,10 +59,6 @@ exports.getCollectionsByOrderLine = async (req, res) => {
     }
 
     try {
-        // This robust query fetches ALL shops for the order line.
-        // For each shop, it finds the actual row in daily_collections for the selected date.
-        // If NO row exists for that date, it dynamically finds the most recent total_balance before that date
-        // and uses it as the 'old_balance' (PREV BAL).
         const [rows] = await db.query(`
             SELECT 
                 s.id AS shop_id,
@@ -79,26 +75,17 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.future_bills, 0) AS future_bills,
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
                 
-                -- Manual Adjustment Breakdown (for pills)
                 COALESCE(adj.m_cash, 0) AS manual_cash,
                 COALESCE(adj.m_upi, 0) AS manual_upi,
                 COALESCE(adj.m_cheque, 0) AS manual_cheque,
                 COALESCE(adj.m_pos, 0) AS manual_pos,
 
-                -- The PREV BAL logic: 
-                COALESCE(
-                    dc.old_balance, 
-                    COALESCE(prev.total_balance, 0)
-                ) AS old_balance,
+                COALESCE(dc.old_balance, COALESCE(prev.total_balance, 0)) AS old_balance,
 
-                -- The TOTAL BAL logic:
                 COALESCE(
                     dc.total_balance,
                     COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
-                ) AS total_balance,
-
-                -- PENDING TRANSACTIONS (Unverified UPI/Cheque)
-                COALESCE(pt.pending_json, '[]') AS pending_transactions
+                ) AS total_balance
             FROM shops s
             JOIN order_lines ol ON s.order_line_id = ol.id
             LEFT JOIN daily_collections dc ON s.id = dc.shop_id AND dc.collection_date = ?
@@ -123,40 +110,46 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 WHERE type = 'Adjustment' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
-            LEFT JOIN (
-                SELECT 
-                    shop_id,
-                    JSON_ARRAYAGG(
-                        JSON_OBJECT(
-                            'id', id,
-                            'type', type,
-                            'amount', amount,
-                            'method', payment_method,
-                            'desc', description,
-                            'date', transaction_date,
-                            'by', created_by
-                        )
-                    ) as pending_json
-                FROM shop_transactions
-                WHERE is_verified = 0
-                GROUP BY shop_id
-            ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
         `, [date, date, date, date, olId]);
 
-        // FETCH EXPENSES
+        // FETCH PENDING TRANSACTIONS SEPARATELY FOR COMPATIBILITY
+        const [pendingRows] = await db.query(`
+            SELECT id, shop_id, type, amount, payment_method as method, description as \`desc\`, transaction_date as date, created_by as \`by\`
+            FROM shop_transactions
+            WHERE is_verified = 0
+        `);
+
+        // Group pending transactions by shop_id
+        const pendingMap = pendingRows.reduce((acc, tx) => {
+            if (!acc[tx.shop_id]) acc[tx.shop_id] = [];
+            acc[tx.shop_id].push(tx);
+            return acc;
+        }, {});
+
+        // Merge pending transactions into rows
+        const collectionsWithPending = rows.map(row => ({
+            ...row,
+            pending_transactions: pendingMap[row.shop_id] || []
+        }));
+
         const [expRows] = await db.query(`
             SELECT * FROM daily_expenses
             WHERE order_line_id = ? AND expense_date = ?
         `, [olId, date]);
 
         res.json({
-            collections: rows,
+            collections: collectionsWithPending,
             expenses: expRows
         });
     } catch (err) {
-        console.error('getCollectionsByOrderLine error:', err);
+        console.error('getCollectionsByOrderLine error DETAILS:', {
+            message: err.message,
+            stack: err.stack,
+            olId,
+            date
+        });
         res.status(500).json({ error: 'Failed to fetch collections for order line' });
     }
 };

@@ -29,4 +29,7 @@ router.post('/sync-all-to-ledger', authMiddleware, shopController.syncAllShopsTo
 router.post('/transactions/:tx_id/approve', authMiddleware, shopController.approveTransaction);
 router.post('/transactions/:tx_id/reject', authMiddleware, shopController.rejectTransaction);
 
+// Admin: Repair corrupted daily_collections ripple for a shop
+router.post('/:id/repair-ripple', authMiddleware, shopController.repairShopRipple);
+
 module.exports = router;

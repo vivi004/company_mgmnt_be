@@ -2,6 +2,52 @@ const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 
+/**
+ * SOURCE-OF-TRUTH RIPPLE
+ * After any transaction is recorded on `targetDate`, recalculate all future
+ * daily_collections rows by chaining: each day's old_balance = previous day's total_balance.
+ *
+ * This replaces the old `old_balance = old_balance + delta` approach which accumulated
+ * errors when the same shop had multiple approvals in one session.
+ */
+async function rebuildRipple(connection, shopId, targetDate) {
+    // Step 1: Get the source-of-truth total_balance for the target date
+    const [targetRows] = await connection.query(
+        `SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?`,
+        [shopId, targetDate]
+    );
+    if (targetRows.length === 0) return; // No row to ripple from
+
+    let prevTotal = parseFloat(targetRows[0].total_balance) || 0;
+
+    // Step 2: Get all future rows for this shop, in ascending date order
+    const [futureRows] = await connection.query(
+        `SELECT collection_date FROM daily_collections
+         WHERE shop_id = ? AND collection_date > ?
+         ORDER BY collection_date ASC`,
+        [shopId, targetDate]
+    );
+
+    // Step 3: Walk forward — each day's old_balance = previous day's total_balance
+    for (const row of futureRows) {
+        await connection.query(
+            `UPDATE daily_collections
+             SET old_balance = ?,
+                 total_balance = ? + todays_bill_amount
+                                   - (cash_collected + upi_collected + cheque_collected)
+                                   + manual_adjustments
+             WHERE shop_id = ? AND collection_date = ?`,
+            [prevTotal, prevTotal, shopId, row.collection_date]
+        );
+
+        // Read the newly computed total_balance for next iteration
+        const [updated] = await connection.query(
+            `SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?`,
+            [shopId, row.collection_date]
+        );
+        prevTotal = updated.length > 0 ? (parseFloat(updated[0].total_balance) || 0) : prevTotal;
+    }
+}
 
 
 // GET all shops for a specific order_line (village)
@@ -452,13 +498,8 @@ const collectPayment = async (req, res) => {
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 targetDate, c, u, q, parseFloat(shop.balance), dashboardBalance]);
 
-            // Ripple forward: propagate delta to all subsequent daily rows
-            await connection.query(`
-                UPDATE daily_collections 
-                SET old_balance = old_balance + ?, 
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-                WHERE shop_id = ? AND collection_date > ?
-            `, [delta, id, targetDate]);
+            // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
+            await rebuildRipple(connection, id, targetDate);
         }
 
         await connection.commit();
@@ -605,13 +646,8 @@ const adjustBalance = async (req, res) => {
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId, targetDate, adjAmount, parseFloat(shop.balance), newBalance]);
 
-            // Ripple forward: propagate delta to all subsequent daily rows
-            await connection.query(`
-                UPDATE daily_collections 
-                SET old_balance = old_balance + ?, 
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-                WHERE shop_id = ? AND collection_date > ?
-            `, [adjAmount, id, targetDate]);
+            // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
+            await rebuildRipple(connection, id, targetDate);
         }
 
         await connection.commit();
@@ -736,13 +772,8 @@ const approveTransaction = async (req, res) => {
             `, [tx.shop_id, shop.shop_name, shop.village_name, shop.order_line_id, txDate, amount, currentBalance, newBalance]);
         }
 
-        // Ripple forward
-        await connection.query(`
-            UPDATE daily_collections 
-            SET old_balance = old_balance + ?, 
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            WHERE shop_id = ? AND collection_date > ?
-        `, [delta, tx.shop_id, txDate]);
+        // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
+        await rebuildRipple(connection, tx.shop_id, txDate);
 
         await connection.commit();
 
@@ -784,6 +815,30 @@ const rejectTransaction = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/shops/:id/repair-ripple?fromDate=YYYY-MM-DD
+ * Admin-only: Rebuild all future daily_collections rows from source-of-truth.
+ * Use this to fix corrupted Prev Bal values without touching the database directly.
+ */
+const repairShopRipple = async (req, res) => {
+    const { id } = req.params;
+    const { fromDate } = req.query;
+    if (!fromDate) return res.status(400).json({ error: 'fromDate query param required (YYYY-MM-DD)' });
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+        await rebuildRipple(connection, id, fromDate);
+        await connection.commit();
+        res.json({ message: `Ripple rebuilt for shop ${id} from ${fromDate}` });
+    } catch (err) {
+        await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        connection.release();
+    }
+};
+
 module.exports = { 
     getShopsByOrderLine, 
     getAllShops, 
@@ -795,5 +850,6 @@ module.exports = {
     adjustBalance,
     syncAllShopsToLedger,
     approveTransaction,
-    rejectTransaction
+    rejectTransaction,
+    repairShopRipple
 };

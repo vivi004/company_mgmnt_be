@@ -513,7 +513,7 @@ const getShopLedger = async (req, res) => {
 // POST Adjust Balance (Admin only)
 const adjustBalance = async (req, res) => {
     const { id } = req.params;
-    let { amount, type, description, created_by } = req.body; // type: 'Adjustment'
+    let { amount, type, description, created_by, payment_method } = req.body; // type: 'Adjustment'
 
     // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
@@ -559,18 +559,15 @@ const adjustBalance = async (req, res) => {
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
 
-        // ── ADJUSTMENT SHIELD: Calculate Active Debt (Total - Future) ──
+        // ── ADJUSTMENT SHIELD ──
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
         const [collRows] = await connection.query(
-            "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
+            "SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
             [id, todayIST]
         );
-        
-        // ── ADJUSTMENT SHIELD: total_balance now already excludes future_bills ──
         const activeDebt = collRows.length > 0 ? parseFloat(collRows[0].total_balance) : currentBalance;
 
-        // If trying to subtract (discount) more than what is active
         if (adjAmount < 0 && Math.abs(adjAmount) > activeDebt + 0.01) {
             return res.status(400).json({ 
                 message: `Invalid to adjust future bill amount. Max adjustable: ₹${activeDebt.toFixed(2)}` 
@@ -578,7 +575,6 @@ const adjustBalance = async (req, res) => {
         }
 
         const newBalance = currentBalance + adjAmount;
-
         if (newBalance < 0) {
             throw new Error(`Resulting balance would be negative (₹${newBalance.toLocaleString('en-IN')}), adjustment cancelled`);
         }
@@ -591,27 +587,37 @@ const adjustBalance = async (req, res) => {
 
         const mysqlDate = new Date();
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Adjustment', adjAmount, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
+            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, 'Adjustment', adjAmount, payment_method || null, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
         );
 
-        // Update daily_collections for this adjustment
+        // 3. Update daily_collections
+        const isPaymentAdjustment = adjAmount < 0 && payment_method;
+        let columnToUpdate = 'manual_adjustments';
+        let updateValue = adjAmount;
 
-
-        // Use actual balance for total_balance column
-        const dashboardBalance = newBalance;
+        if (isPaymentAdjustment) {
+            const method = payment_method.toLowerCase();
+            if (method.includes('upi')) columnToUpdate = 'upi_collected';
+            else if (method.includes('cheque')) columnToUpdate = 'cheque_collected';
+            else columnToUpdate = 'cash_collected';
+            
+            // For collection columns, we ADD the absolute value because the ledger formula is:
+            // balance = old + bill - (cash + upi + cheque) + manual_adj
+            updateValue = Math.abs(adjAmount);
+        }
 
         await connection.query(`
             INSERT INTO daily_collections
                 (shop_id, shop_name, village_name, order_line_id, collection_date,
-                 manual_adjustments, old_balance, total_balance, future_bills)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                 ${columnToUpdate}, old_balance, total_balance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
-                manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
                 total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), dashboardBalance]);
+        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, updateValue, parseFloat(shop.balance), newBalance]);
 
-        // SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
+        // 4. SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
         await connection.query(`
             UPDATE daily_collections 
             SET old_balance = old_balance + ?, 
@@ -629,6 +635,7 @@ const adjustBalance = async (req, res) => {
             specific_area: shop.specific_area,
             type: 'Adjustment',
             amount: adjAmount,
+            payment_method: payment_method || null,
             description: description || 'Manual Adjustment',
             balance_before: parseFloat(shop.balance) || 0,
             balance_after: newBalance,
@@ -642,6 +649,7 @@ const adjustBalance = async (req, res) => {
         if (connection) connection.release();
     }
 };
+
 
 module.exports = { 
     getShopsByOrderLine, 

@@ -24,6 +24,5 @@ router.post('/:id/collect-payment', authMiddleware, shopController.collectPaymen
 router.get('/:id/ledger', authMiddleware, shopController.getShopLedger);
 router.post('/:id/adjust-balance', authMiddleware, shopController.adjustBalance);
 router.post('/sync-all-to-ledger', authMiddleware, shopController.syncAllShopsToLedger);
-router.post('/transactions/:id/verify', authMiddleware, shopController.verifyTransaction);
 
 module.exports = router;

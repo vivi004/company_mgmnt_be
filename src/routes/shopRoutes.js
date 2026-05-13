@@ -25,4 +25,8 @@ router.get('/:id/ledger', authMiddleware, shopController.getShopLedger);
 router.post('/:id/adjust-balance', authMiddleware, shopController.adjustBalance);
 router.post('/sync-all-to-ledger', authMiddleware, shopController.syncAllShopsToLedger);
 
+// Approval Workflow
+router.post('/transactions/:tx_id/approve', authMiddleware, shopController.approveTransaction);
+router.post('/transactions/:tx_id/reject', authMiddleware, shopController.rejectTransaction);
+
 module.exports = router;

@@ -392,33 +392,45 @@ const collectPayment = async (req, res) => {
             });
         }
 
-        const newBalance = currentBalance - payAmount;
-        const delta = -payAmount; // The change to ripple forward
-
-        // 2. Update shop_balances
-        await connection.query(
-            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-            [id, newBalance]
-        );
-
         const mysqlDate = new Date();
+        const payMethod = (payment_method || 'Cash').toUpperCase();
+        
+        // Comprehensive check for ANY digital or cheque mode
+        const isDigital = payMethod.includes('UPI') || payMethod.includes('GPAY') || 
+                         payMethod.includes('PHONEPE') || payMethod.includes('PAYTM') || 
+                         payMethod.includes('CHEQUE') || payMethod.includes('CHECK');
+        
+        const approvalStatus = isDigital ? 'PENDING' : 'APPROVED';
+        const affectsBalance = !isDigital;
+        
+        const newBalance = affectsBalance ? currentBalance - payAmount : currentBalance;
+        const delta = affectsBalance ? -payAmount : 0;
+
+        // 2. Update shop_balances ONLY if approved (Cash)
+        if (affectsBalance) {
+            await connection.query(
+                'UPDATE shop_balances SET balance = ? WHERE shop_id = ?',
+                [newBalance, id]
+            );
+        }
+
+        // 3. Insert Transaction with explicit status
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Payment', payAmount, payment_method || 'Cash', description || 'Payment Received', newBalance, created_by || 'Staff', mysqlDate]
+            `INSERT INTO shop_transactions 
+                (shop_id, type, amount, payment_mode, transaction_category, description, 
+                 balance_after, approval_status, affects_balance, created_by, transaction_date) 
+             VALUES (?, 'Payment', ?, ?, 'PAYMENT', ?, ?, ?, ?, ?, ?)`,
+            [id, payAmount, payMethod, description || `Payment Received (${payMethod})`, 
+             newBalance, approvalStatus, affectsBalance, created_by || 'Staff', mysqlDate]
         );
 
-        // Update daily_collections for this payment
-        const { cash_amount, upi_amount, cheque_amount } = req.body;
-        const payMethod = (payment_method || 'Cash').toLowerCase();
-        
+        // 4. Update daily_collections ONLY if approved (Cash)
+        if (affectsBalance) {
+            const { cash_amount, upi_amount, cheque_amount } = req.body;
+            const dashboardBalance = newBalance;
 
-
-        // Use actual balance for total_balance column
-        const dashboardBalance = newBalance;
-
-        if (cash_amount !== undefined || upi_amount !== undefined || cheque_amount !== undefined) {
-            // Precise split amounts provided
-            const c = parseFloat(cash_amount) || 0;
+            // Use split logic if provided, else fallback to full amount as cash
+            const c = cash_amount !== undefined ? parseFloat(cash_amount) : payAmount;
             const u = parseFloat(upi_amount) || 0;
             const q = parseFloat(cheque_amount) || 0;
 
@@ -436,31 +448,7 @@ const collectPayment = async (req, res) => {
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
                 todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
 
-            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
-            await connection.query(`
-                UPDATE daily_collections 
-                SET old_balance = old_balance + ?, 
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-                WHERE shop_id = ? AND collection_date > ?
-            `, [delta, id, todayIST]);
-        } else {
-            // Fallback to single mode detection
-            const payMethod = (payment_method || 'Cash').toLowerCase();
-            const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
-                payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
-
-            await connection.query(`
-                INSERT INTO daily_collections
-                    (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     ${columnToUpdate}, old_balance, total_balance, future_bills, manual_adjustments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                ON DUPLICATE KEY UPDATE
-                    ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
-                todayIST, payAmount, parseFloat(shop.balance), dashboardBalance]);
-
-            // SMART PROPAGATION: Ripple the delta (-payAmount) to all FUTURE rows
+            // Ripple forward
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
@@ -479,13 +467,17 @@ const collectPayment = async (req, res) => {
             specific_area: shop.specific_area,
             type: 'Payment',
             amount: -payAmount,
-            payment_method: payment_method || 'Cash',
-            description: description || 'Payment Received',
+            payment_method: payMethod,
+            description: (description || 'Payment Received') + (isDigital ? ' (PENDING APPROVAL)' : ''),
             balance_before: parseFloat(shop.balance) || 0,
             balance_after: newBalance,
             created_by: created_by || 'Staff'
         });
-        res.json({ message: 'Payment recorded successfully', new_balance: newBalance });
+        res.json({ 
+            message: isDigital ? 'Payment submitted for Admin approval' : 'Payment recorded successfully', 
+            new_balance: newBalance,
+            status: approvalStatus
+        });
     } catch (err) {
         if (connection) await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -559,63 +551,85 @@ const adjustBalance = async (req, res) => {
         const adjAmount = parseFloat(amount);
         const currentBalance = parseFloat(shop.balance) || 0;
 
+        // ── APPROVAL LOGIC ──
+        const isCash = (payment_method || '').toUpperCase() === 'CASH';
+        const approvalStatus = isCash ? 'APPROVED' : 'PENDING';
+        const affectsBalance = isCash;
+
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
 
-        const newBalance = currentBalance + adjAmount;
+        const newBalance = affectsBalance ? currentBalance + adjAmount : currentBalance;
 
-        if (newBalance < 0) {
+        if (affectsBalance && newBalance < 0) {
             throw new Error(`Resulting balance would be negative (₹${newBalance.toLocaleString('en-IN')}), adjustment cancelled`);
         }
 
-        // 2. Update shop_balances
-        await connection.query(
-            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-            [id, newBalance]
-        );
+        // 2. Update shop_balances (ONLY if approved)
+        if (affectsBalance) {
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [id, newBalance]
+            );
+        }
 
         const mysqlDate = new Date();
         await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, 'Adjustment', adjAmount, payment_method || null, description || 'Manual Adjustment', newBalance, created_by || 'Admin', mysqlDate]
+            `INSERT INTO shop_transactions 
+             (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date, 
+              approval_status, affects_balance, transaction_category, payment_mode) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                id, 'Adjustment', adjAmount, payment_method || null, description || 'Manual Adjustment', 
+                newBalance, created_by || 'Admin', mysqlDate,
+                approvalStatus, affectsBalance, 'MANUAL_ADJUST', (payment_method || 'CASH').toUpperCase()
+            ]
         );
 
-        // 3. Update daily_collections
-        await connection.query(`
-            INSERT INTO daily_collections
-                (shop_id, shop_name, village_name, order_line_id, collection_date,
-                 manual_adjustments, old_balance, total_balance)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-                manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-        `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), newBalance]);
+        // 3. Update daily_collections (ONLY if approved)
+        if (affectsBalance) {
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     manual_adjustments, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), newBalance]);
 
-        // 4. SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
-        await connection.query(`
-            UPDATE daily_collections 
-            SET old_balance = old_balance + ?, 
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            WHERE shop_id = ? AND collection_date > ?
-        `, [adjAmount, id, todayIST]);
+            // 4. SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
+            await connection.query(`
+                UPDATE daily_collections 
+                SET old_balance = old_balance + ?, 
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                WHERE shop_id = ? AND collection_date > ?
+            `, [adjAmount, id, todayIST]);
+        }
 
         await connection.commit();
 
-        // Push to Webhook
-        webhookService.sendTransactionToWebhook({
-            shop_id: id,
-            shop_name: shop.shop_name,
-            village_name: shop.village_name,
-            specific_area: shop.specific_area,
-            type: 'Adjustment',
-            amount: adjAmount,
-            payment_method: payment_method || null,
-            description: description || 'Manual Adjustment',
-            balance_before: parseFloat(shop.balance) || 0,
-            balance_after: newBalance,
-            created_by: created_by || 'Admin'
+        // Push to Webhook (ONLY if approved)
+        if (affectsBalance) {
+            webhookService.sendTransactionToWebhook({
+                shop_id: id,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                specific_area: shop.specific_area,
+                type: 'Adjustment',
+                amount: adjAmount,
+                payment_method: payment_method || null,
+                description: description || 'Manual Adjustment',
+                balance_before: parseFloat(shop.balance) || 0,
+                balance_after: newBalance,
+                created_by: created_by || 'Admin'
+            });
+        }
+        res.json({ 
+            message: isCash ? 'Balance adjusted successfully' : 'Adjustment submitted for Admin approval', 
+            new_balance: newBalance,
+            status: approvalStatus
         });
-        res.json({ message: 'Balance adjusted successfully', new_balance: newBalance });
     } catch (err) {
         if (connection) await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -624,6 +638,144 @@ const adjustBalance = async (req, res) => {
     }
 };
 
+
+// ADMIN Approval
+const approveTransaction = async (req, res) => {
+    const { tx_id } = req.params;
+    let actingUserName = 'Admin';
+
+    if (req.user && req.user.id) {
+        try {
+            const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) actingUserName = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+        } catch (e) {}
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Get Transaction
+        const [txs] = await connection.query('SELECT * FROM shop_transactions WHERE id = ? FOR UPDATE', [tx_id]);
+        if (txs.length === 0) return res.status(404).json({ error: 'Transaction not found' });
+        const tx = txs[0];
+
+        if (tx.approval_status !== 'PENDING') return res.status(400).json({ error: 'Transaction is already processed' });
+
+        // 2. Get Shop
+        const [shops] = await connection.query(`
+            SELECT s.*, COALESCE(sb.balance, 0) as balance 
+            FROM shops s 
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id 
+            WHERE s.id = ? FOR UPDATE
+        `, [tx.shop_id]);
+        const shop = shops[0];
+
+        const amount = parseFloat(tx.amount);
+        const currentBalance = parseFloat(shop.balance);
+        
+        // Calculate new balance based on category
+        // PAYMENT: balance = balance - amount
+        // ADJUST: balance = balance + amount (amount can be negative)
+        const isPayment = tx.transaction_category === 'PAYMENT';
+        const newBalance = isPayment ? currentBalance - amount : currentBalance + amount;
+        const delta = isPayment ? -amount : amount;
+
+        // 3. Update shop_balances
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [tx.shop_id, newBalance]
+        );
+
+        // 4. Update Transaction status
+        await connection.query(
+            `UPDATE shop_transactions SET 
+             approval_status = 'APPROVED', 
+             affects_balance = TRUE, 
+             balance_after = ?, 
+             approved_by = ?, 
+             approved_at = NOW() 
+             WHERE id = ?`,
+            [newBalance, actingUserName, tx_id]
+        );
+
+        // 5. Update daily_collections
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
+        const txDate = dateRows[0].tx_date;
+
+        if (isPayment) {
+            const payMethod = (tx.payment_method || 'Cash').toLowerCase();
+            const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
+                payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
+
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     ${columnToUpdate}, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON DUPLICATE KEY UPDATE
+                    ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [tx.shop_id, shop.shop_name, shop.village_name, shop.order_line_id, txDate, amount, currentBalance, newBalance]);
+        } else {
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     manual_adjustments, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [tx.shop_id, shop.shop_name, shop.village_name, shop.order_line_id, txDate, amount, currentBalance, newBalance]);
+        }
+
+        // Ripple forward
+        await connection.query(`
+            UPDATE daily_collections 
+            SET old_balance = old_balance + ?, 
+                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            WHERE shop_id = ? AND collection_date > ?
+        `, [delta, tx.shop_id, txDate]);
+
+        await connection.commit();
+
+        // Push to Webhook
+        webhookService.sendTransactionToWebhook({
+            shop_id: tx.shop_id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            specific_area: shop.owner_name,
+            type: tx.type,
+            amount: isPayment ? -amount : amount,
+            payment_method: tx.payment_method,
+            description: tx.description + ' (APPROVED)',
+            balance_before: currentBalance,
+            balance_after: newBalance,
+            created_by: actingUserName
+        });
+
+        res.json({ message: 'Transaction approved', new_balance: newBalance });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
+const rejectTransaction = async (req, res) => {
+    const { tx_id } = req.params;
+    const { reason } = req.body;
+    try {
+        await db.query(
+            "UPDATE shop_transactions SET approval_status = 'REJECTED', rejected_reason = ? WHERE id = ? AND approval_status = 'PENDING'",
+            [reason || 'Rejected by Admin', tx_id]
+        );
+        res.json({ message: 'Transaction rejected' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to reject transaction' });
+    }
+};
 
 module.exports = { 
     getShopsByOrderLine, 
@@ -634,5 +786,7 @@ module.exports = {
     collectPayment,
     getShopLedger,
     adjustBalance,
-    syncAllShopsToLedger
+    syncAllShopsToLedger,
+    approveTransaction,
+    rejectTransaction
 };

@@ -60,9 +60,6 @@ exports.getCollectionsByOrderLine = async (req, res) => {
 
     try {
         // This robust query fetches ALL shops for the order line.
-        // For each shop, it finds the actual row in daily_collections for the selected date.
-        // If NO row exists for that date, it dynamically finds the most recent total_balance before that date
-        // and uses it as the 'old_balance' (PREV BAL).
         const [rows] = await db.query(`
             SELECT 
                 s.id AS shop_id,
@@ -79,19 +76,19 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.future_bills, 0) AS future_bills,
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
                 
-                -- Manual Adjustment Breakdown (for pills)
+                -- APPROVED Manual Adjustment Breakdown
                 COALESCE(adj.m_cash, 0) AS manual_cash,
                 COALESCE(adj.m_upi, 0) AS manual_upi,
                 COALESCE(adj.m_cheque, 0) AS manual_cheque,
                 COALESCE(adj.m_pos, 0) AS manual_pos,
 
-                -- The PREV BAL logic: 
-                COALESCE(
-                    dc.old_balance, 
-                    COALESCE(prev.total_balance, 0)
-                ) AS old_balance,
+                -- PENDING Transactions for the row
+                COALESCE(pt.pending_json, '[]') AS pending_transactions,
 
-                -- The TOTAL BAL logic:
+                -- The PREV BAL logic
+                COALESCE(dc.old_balance, COALESCE(prev.total_balance, 0)) AS old_balance,
+
+                -- The TOTAL BAL logic
                 COALESCE(
                     dc.total_balance,
                     COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
@@ -112,17 +109,34 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             LEFT JOIN (
                 SELECT 
                     shop_id,
-                    SUM(CASE WHEN amount < 0 AND (payment_method = 'Cash' OR payment_method IS NULL) THEN ABS(amount) ELSE 0 END) as m_cash,
-                    SUM(CASE WHEN amount < 0 AND payment_method = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
-                    SUM(CASE WHEN amount < 0 AND payment_method = 'Cheque' THEN ABS(amount) ELSE 0 END) as m_cheque,
-                    SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as m_pos
+                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'CASH' THEN ABS(amount) ELSE 0 END) as m_cash,
+                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
+                    SUM(CASE WHEN amount < 0 AND transaction_category = 'MANUAL_ADJUST' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
+                    SUM(CASE WHEN amount > 0 AND transaction_category = 'MANUAL_ADJUST' THEN amount ELSE 0 END) as m_pos
                 FROM shop_transactions
-                WHERE type = 'Adjustment' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                WHERE approval_status = 'APPROVED' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
+            LEFT JOIN (
+                SELECT 
+                    shop_id,
+                    JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'id', id,
+                            'type', type,
+                            'category', transaction_category,
+                            'amount', amount,
+                            'mode', payment_mode,
+                            'description', description
+                        )
+                    ) as pending_json
+                FROM shop_transactions
+                WHERE approval_status = 'PENDING' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                GROUP BY shop_id
+            ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, olId]);
+        `, [date, date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

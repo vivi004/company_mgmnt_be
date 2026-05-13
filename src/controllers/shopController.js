@@ -327,7 +327,7 @@ const syncAllShopsToLedger = async (req, res) => {
 // POST Collect Payment
 const collectPayment = async (req, res) => {
     const { id } = req.params;
-    let { amount, payment_method, description, created_by } = req.body;
+    let { amount, payment_method, description, created_by, collection_date } = req.body;
 
     // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
@@ -376,9 +376,13 @@ const collectPayment = async (req, res) => {
         // ── PAYMENT SHIELD: Calculate Active Debt (Total - Future) ──
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
+        // Use caller-provided date for retroactive entries; fall back to today
+        const targetDate = collection_date || todayIST;
+        // Build a proper JS Date for the target day (IST noon avoids timezone edge cases)
+        const mysqlDate = collection_date ? new Date(`${collection_date}T12:00:00+05:30`) : new Date();
         const [collRows] = await connection.query(
             "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
-            [id, todayIST]
+            [id, targetDate]
         );
         
         // ── PAYMENT SHIELD: total_balance now already excludes future_bills ──
@@ -392,7 +396,7 @@ const collectPayment = async (req, res) => {
             });
         }
 
-        const mysqlDate = new Date();
+        // mysqlDate and targetDate already computed above
         const payMethod = (payment_method || 'Cash').toUpperCase();
         
         // Comprehensive check for ANY digital or cheque mode
@@ -446,15 +450,15 @@ const collectPayment = async (req, res) => {
                     cheque_collected = cheque_collected + VALUES(cheque_collected),
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
-                todayIST, c, u, q, parseFloat(shop.balance), dashboardBalance]);
+                targetDate, c, u, q, parseFloat(shop.balance), dashboardBalance]);
 
-            // Ripple forward
+            // Ripple forward: propagate delta to all subsequent daily rows
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                 WHERE shop_id = ? AND collection_date > ?
-            `, [delta, id, todayIST]);
+            `, [delta, id, targetDate]);
         }
 
         await connection.commit();
@@ -505,7 +509,7 @@ const getShopLedger = async (req, res) => {
 // POST Adjust Balance (Admin only)
 const adjustBalance = async (req, res) => {
     const { id } = req.params;
-    let { amount, type, description, created_by, payment_method } = req.body; // type: 'Adjustment'
+    let { amount, type, description, created_by, payment_method, collection_date } = req.body; // type: 'Adjustment'
 
     // Safety check: If created_by is missing, fetch the acting user's name from the DB
     if (!created_by && req.user && req.user.id) {
@@ -558,6 +562,9 @@ const adjustBalance = async (req, res) => {
 
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
+        // Use caller-provided date for retroactive entries; fall back to today
+        const targetDate = collection_date || todayIST;
+        const mysqlDate = collection_date ? new Date(`${collection_date}T12:00:00+05:30`) : new Date();
 
         const newBalance = affectsBalance ? currentBalance + adjAmount : currentBalance;
 
@@ -573,7 +580,7 @@ const adjustBalance = async (req, res) => {
             );
         }
 
-        const mysqlDate = new Date();
+        // mysqlDate already computed above from targetDate
         await connection.query(
             `INSERT INTO shop_transactions 
              (shop_id, type, amount, payment_method, description, balance_after, created_by, transaction_date, 
@@ -596,15 +603,15 @@ const adjustBalance = async (req, res) => {
                 ON DUPLICATE KEY UPDATE
                     manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, todayIST, adjAmount, parseFloat(shop.balance), newBalance]);
+            `, [id, shop.shop_name, shop.village_name, shopOrderLineId, targetDate, adjAmount, parseFloat(shop.balance), newBalance]);
 
-            // 4. SMART PROPAGATION: Ripple the adjustment delta to all FUTURE rows
+            // Ripple forward: propagate delta to all subsequent daily rows
             await connection.query(`
                 UPDATE daily_collections 
                 SET old_balance = old_balance + ?, 
                     total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
                 WHERE shop_id = ? AND collection_date > ?
-            `, [adjAmount, id, todayIST]);
+            `, [adjAmount, id, targetDate]);
         }
 
         await connection.commit();

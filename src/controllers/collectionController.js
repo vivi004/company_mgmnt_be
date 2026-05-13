@@ -131,12 +131,12 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                         )
                     ) as pending_json
                 FROM shop_transactions
-                WHERE approval_status = 'PENDING'
+                WHERE approval_status = 'PENDING' AND DATE(transaction_date) = ?
                 GROUP BY shop_id
             ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, olId]);
+        `, [date, date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

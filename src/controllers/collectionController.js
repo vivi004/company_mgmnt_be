@@ -79,17 +79,19 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.future_bills, 0) AS future_bills,
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
                 
+                -- Manual Adjustment Breakdown (for pills)
+                COALESCE(adj.m_cash, 0) AS manual_cash,
+                COALESCE(adj.m_upi, 0) AS manual_upi,
+                COALESCE(adj.m_cheque, 0) AS manual_cheque,
+                COALESCE(adj.m_pos, 0) AS manual_pos,
+
                 -- The PREV BAL logic: 
-                -- If a record exists for today, use its old_balance.
-                -- Otherwise, find the most recent total_balance before this date.
-                -- NEVER fallback to sb.balance for historical accuracy.
                 COALESCE(
                     dc.old_balance, 
                     COALESCE(prev.total_balance, 0)
                 ) AS old_balance,
 
                 -- The TOTAL BAL logic:
-                -- Always calculate based on the PREV BAL (old_balance) to ensure math consistency.
                 COALESCE(
                     dc.total_balance,
                     COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
@@ -107,9 +109,20 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                     GROUP BY shop_id
                 ) dc2 ON dc1.shop_id = dc2.shop_id AND dc1.collection_date = dc2.max_date
             ) prev ON s.id = prev.shop_id
+            LEFT JOIN (
+                SELECT 
+                    shop_id,
+                    SUM(CASE WHEN amount < 0 AND (payment_method = 'Cash' OR payment_method IS NULL) THEN ABS(amount) ELSE 0 END) as m_cash,
+                    SUM(CASE WHEN amount < 0 AND payment_method = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
+                    SUM(CASE WHEN amount < 0 AND payment_method = 'Cheque' THEN ABS(amount) ELSE 0 END) as m_cheque,
+                    SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as m_pos
+                FROM shop_transactions
+                WHERE type = 'Adjustment' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                GROUP BY shop_id
+            ) adj ON s.id = adj.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, olId]);
+        `, [date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

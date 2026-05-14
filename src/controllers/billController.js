@@ -178,7 +178,7 @@ exports.createBill = async (req, res) => {
             // 7. Create Shop Transaction (Ledger Entry)
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDate]
+                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate]
             );
 
             // Push to Webhook (Google Sheets)

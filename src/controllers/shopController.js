@@ -723,10 +723,9 @@ const approveTransaction = async (req, res) => {
              affects_balance = TRUE, 
              balance_after = ?, 
              approved_by = ?, 
-             approved_at = ?,
-             transaction_date = ? 
+             approved_at = ?
              WHERE id = ?`,
-            [newBalance, actingUserName, istApproveStr, istApproveStr, tx_id]
+            [newBalance, actingUserName, istApproveStr, tx_id]
         );
 
         // 5. Update daily_collections

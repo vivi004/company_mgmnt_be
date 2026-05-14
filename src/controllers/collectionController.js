@@ -118,7 +118,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
                     SUM(CASE WHEN amount > 0 AND type = 'Adjustment' THEN amount ELSE 0 END) as m_pos
                 FROM shop_transactions
-                WHERE approval_status = 'APPROVED' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
+                WHERE approval_status = 'APPROVED' AND DATE(transaction_date) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
             LEFT JOIN (

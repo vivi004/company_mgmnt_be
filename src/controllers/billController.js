@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const webhookService = require('../services/webhookService');
+const financialService = require('../services/financialService');
 
 exports.createBill = async (req, res) => {
     const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
@@ -141,7 +142,7 @@ exports.createBill = async (req, res) => {
         const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
         const amount = parseFloat(total_amount) || 0;
 
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
         const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : todayStr;
         const isFutureBill = deliveryDateOnly > todayStr;
@@ -219,7 +220,7 @@ exports.createBill = async (req, res) => {
                 deliveryDateOnly, amount, parseFloat(shop.balance) - amount, finalBalance]);
 
             // 2. MASTER SYNC: Heal the ledger starting from the delivery date
-            await recalculateShopLedger(connection, shop.id, deliveryDateOnly);
+            await financialService.rebuildRipple(connection, shop.id, deliveryDateOnly);
         }
 
         await connection.commit();
@@ -393,7 +394,7 @@ exports.deleteBill = async (req, res) => {
 
             // 5b. Reverse from daily_collections
             const delDateStr = bill.delivery_date_str || bill.bill_date_str;
-            const [todayRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+            const [todayRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
             const todayStr = todayRows[0].today;
             const isFutureBill = delDateStr > todayStr;
 
@@ -423,7 +424,7 @@ exports.deleteBill = async (req, res) => {
 
                 // MASTER SYNC: Heal the ledger starting from the delivery date
                 if (bill.is_applied_to_balance) {
-                    await recalculateShopLedger(connection, shop.id, delDateStr);
+                    await financialService.rebuildRipple(connection, shop.id, delDateStr);
                 }
             }
         }
@@ -537,7 +538,7 @@ exports.updateBill = async (req, res) => {
         if (collShop) {
             const oldDateStr = bill.delivery_date_str || bill.bill_date_str;
             const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
-            const [todayDateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+            const [todayDateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
             const todayStrUpd = todayDateRows[0].today;
 
             if (oldDateStr !== newDateStr) {
@@ -580,7 +581,7 @@ exports.updateBill = async (req, res) => {
 
                 // MASTER SYNC: Heal the ledger starting from the earliest changed date
                 const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
-                await recalculateShopLedger(connection, collShop.id, earliestDate);
+                await financialService.rebuildRipple(connection, collShop.id, earliestDate);
             } else if (diff !== 0) {
                 // Same date, just update amount difference
                 await connection.query(`
@@ -591,7 +592,7 @@ exports.updateBill = async (req, res) => {
                 `, [diff, collShop.id, newDateStr]);
 
                 // MASTER SYNC: Heal the ledger starting from the bill date
-                await recalculateShopLedger(connection, collShop.id, newDateStr);
+                await financialService.rebuildRipple(connection, collShop.id, newDateStr);
             }
         }
 
@@ -659,56 +660,5 @@ exports.getBillsByDateRange = async (req, res) => {
     }
 };
 
-/**
- * Internal helper to heal the balance chain for a shop starting from a specific date.
- */
-async function recalculateShopLedger(connection, shopId, startDateStr) {
-    console.log(`[LEDGER] Recalculating ledger for Shop #${shopId} starting ${startDateStr}`);
-    
-    // 1. Get all records for this shop from the starting date onwards
-    const [rows] = await connection.query(`
-        SELECT * FROM daily_collections 
-        WHERE shop_id = ? AND collection_date >= ?
-        ORDER BY collection_date ASC
-    `, [shopId, startDateStr]);
-
-    // 2. Fetch the starting previous balance
-    const [prevRows] = await connection.query(`
-        SELECT total_balance FROM daily_collections 
-        WHERE shop_id = ? AND collection_date < ?
-        ORDER BY collection_date DESC LIMIT 1
-    `, [shopId, startDateStr]);
-
-    let runningBalance = prevRows.length > 0 ? parseFloat(prevRows[0].total_balance) : 0;
-
-    // 3. Sequentially update each row to ensure the chain is perfect
-    for (const row of rows) {
-        const todaysBill = parseFloat(row.todays_bill_amount) || 0;
-        const cash = parseFloat(row.cash_collected) || 0;
-        const upi = parseFloat(row.upi_collected) || 0;
-        const cheque = parseFloat(row.cheque_collected) || 0;
-        const adj = parseFloat(row.manual_adjustments) || 0;
-        
-        const newOldBal = runningBalance;
-        const newTotalBal = newOldBal + todaysBill - (cash + upi + cheque) + adj;
-
-        await connection.query(`
-            UPDATE daily_collections 
-            SET old_balance = ?, total_balance = ? 
-            WHERE id = ?
-        `, [newOldBal, newTotalBal, row.id]);
-
-        runningBalance = newTotalBal;
-    }
-
-    // 4. Update the live shop balance to match the latest calculated total
-    await connection.query(`
-        UPDATE shop_balances SET balance = ? WHERE shop_id = ?
-    `, [runningBalance, shopId]);
-
-    // Also update the shops table if it has a balance column
-    await connection.query(`
-        UPDATE shops SET balance = ? WHERE id = ?
-    `, [runningBalance, shopId]);
-}
+// Legacy local recalculateShopLedger removed in favor of financialService.rebuildRipple
 

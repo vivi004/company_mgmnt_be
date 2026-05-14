@@ -30,6 +30,7 @@ router.post('/transactions/:tx_id/approve', authMiddleware, shopController.appro
 router.post('/transactions/:tx_id/reject', authMiddleware, shopController.rejectTransaction);
 
 // Admin: Repair corrupted daily_collections ripple for a shop
+router.post('/repair-all-ripples', authMiddleware, shopController.repairAllShopsRipple);
 router.post('/:id/repair-ripple', authMiddleware, shopController.repairShopRipple);
 
 module.exports = router;

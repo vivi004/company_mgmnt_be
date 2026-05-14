@@ -77,6 +77,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
                 
                 -- APPROVED Manual Adjustment Breakdown
+                COALESCE(adj.discount_amount, 0) AS discount_amount,
                 COALESCE(adj.m_cash, 0) AS manual_cash,
                 COALESCE(adj.m_upi, 0) AS manual_upi,
                 COALESCE(adj.m_cheque, 0) AS manual_cheque,
@@ -109,6 +110,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             LEFT JOIN (
                 SELECT 
                     shop_id,
+                    SUM(CASE WHEN payment_mode = 'DISCOUNT' THEN amount ELSE 0 END) as discount_amount,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CASH' THEN ABS(amount) ELSE 0 END) as m_cash,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,

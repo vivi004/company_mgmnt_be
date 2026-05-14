@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const db = require('../config/db');
+const financialService = require('./financialService');
 
 /**
  * Helper: Get current IST date string (YYYY-MM-DD)
@@ -93,6 +94,10 @@ async function applyDueBills() {
         try {
             await connection.beginTransaction();
 
+            // Compute IST timestamp once for all entries in this batch
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
+
             for (const bill of dueBills) {
                 const amount = parseFloat(bill.total_amount) || 0;
                 const newBalance = parseFloat(bill.current_balance) + amount;
@@ -103,10 +108,10 @@ async function applyDueBills() {
                     [bill.shop_id, newBalance]
                 );
 
-                // 2. Log ledger entry
+                // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
                 await connection.query(
-                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, newBalance, bill.created_by || 'System']
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, newBalance, bill.created_by || 'System', istTimestamp]
                 );
 
                 // 3. Update daily_collections for today — add to todays_bill_amount + total_balance
@@ -134,6 +139,9 @@ async function applyDueBills() {
                     'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
                     [bill.id]
                 );
+
+                // 6. MASTER SYNC: Ripple forward from today
+                await financialService.rebuildRipple(connection, bill.shop_id, todayIST);
             }
 
             await connection.commit();

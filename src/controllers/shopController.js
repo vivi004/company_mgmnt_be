@@ -1,53 +1,9 @@
 const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
+const financialService = require('../services/financialService');
 
-/**
- * SOURCE-OF-TRUTH RIPPLE
- * After any transaction is recorded on `targetDate`, recalculate all future
- * daily_collections rows by chaining: each day's old_balance = previous day's total_balance.
- *
- * This replaces the old `old_balance = old_balance + delta` approach which accumulated
- * errors when the same shop had multiple approvals in one session.
- */
-async function rebuildRipple(connection, shopId, targetDate) {
-    // Step 1: Get the source-of-truth total_balance for the target date
-    const [targetRows] = await connection.query(
-        `SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?`,
-        [shopId, targetDate]
-    );
-    if (targetRows.length === 0) return; // No row to ripple from
-
-    let prevTotal = parseFloat(targetRows[0].total_balance) || 0;
-
-    // Step 2: Get all future rows for this shop, in ascending date order
-    const [futureRows] = await connection.query(
-        `SELECT collection_date FROM daily_collections
-         WHERE shop_id = ? AND collection_date > ?
-         ORDER BY collection_date ASC`,
-        [shopId, targetDate]
-    );
-
-    // Step 3: Walk forward — each day's old_balance = previous day's total_balance
-    for (const row of futureRows) {
-        await connection.query(
-            `UPDATE daily_collections
-             SET old_balance = ?,
-                 total_balance = ? + todays_bill_amount
-                                   - (cash_collected + upi_collected + cheque_collected)
-                                   + manual_adjustments
-             WHERE shop_id = ? AND collection_date = ?`,
-            [prevTotal, prevTotal, shopId, row.collection_date]
-        );
-
-        // Read the newly computed total_balance for next iteration
-        const [updated] = await connection.query(
-            `SELECT total_balance FROM daily_collections WHERE shop_id = ? AND collection_date = ?`,
-            [shopId, row.collection_date]
-        );
-        prevTotal = updated.length > 0 ? (parseFloat(updated[0].total_balance) || 0) : prevTotal;
-    }
-}
+// Legacy local rebuildRipple removed in favor of financialService.rebuildRipple
 
 
 // GET all shops for a specific order_line (village)
@@ -221,7 +177,7 @@ const updateShop = async (req, res) => {
             );
 
             // Update daily_collections for this manual edit
-            const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+            const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
             const todayIST = dateRows[0].today;
 
             // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
@@ -420,12 +376,16 @@ const collectPayment = async (req, res) => {
         const currentBalance = parseFloat(shop.balance) || 0;
 
         // ── PAYMENT SHIELD: Calculate Active Debt (Total - Future) ──
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
         // Use caller-provided date for retroactive entries; fall back to today
         const targetDate = collection_date || todayIST;
-        // Build a proper JS Date for the target day (IST noon avoids timezone edge cases)
-        const mysqlDate = collection_date ? new Date(`${collection_date}T12:00:00+05:30`) : new Date();
+        // Build transaction_date: past date + actual current IST time (so ledger shows real action time)
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS in IST
+        const mysqlDate = collection_date
+            ? `${collection_date} ${currentISTTime}`   // past date + current IST time
+            : istNow.toISOString().slice(0, 19).replace('T', ' '); // full current IST datetime
         const [collRows] = await connection.query(
             "SELECT total_balance, future_bills FROM daily_collections WHERE shop_id = ? AND collection_date = ?",
             [id, targetDate]
@@ -446,9 +406,11 @@ const collectPayment = async (req, res) => {
         const payMethod = (payment_method || 'Cash').toUpperCase();
         
         // Comprehensive check for ANY digital or cheque mode
-        const isDigital = payMethod.includes('UPI') || payMethod.includes('GPAY') || 
+        const isDiscount = payMethod === 'DISCOUNT';
+        const isDigital = !isDiscount && (
+                         payMethod.includes('UPI') || payMethod.includes('GPAY') || 
                          payMethod.includes('PHONEPE') || payMethod.includes('PAYTM') || 
-                         payMethod.includes('CHEQUE') || payMethod.includes('CHECK');
+                         payMethod.includes('CHEQUE') || payMethod.includes('CHECK'));
         
         const approvalStatus = isDigital ? 'PENDING' : 'APPROVED';
         const affectsBalance = !isDigital;
@@ -474,32 +436,48 @@ const collectPayment = async (req, res) => {
              newBalance, approvalStatus, affectsBalance, created_by || 'Staff', mysqlDate]
         );
 
-        // 4. Update daily_collections ONLY if approved (Cash)
+        // 4. Update daily_collections ONLY if approved (Cash or Discount)
         if (affectsBalance) {
-            const { cash_amount, upi_amount, cheque_amount } = req.body;
-            const dashboardBalance = newBalance;
+            if (isDiscount) {
+                // DISCOUNT: reduce balance via manual_adjustments, NOT collection columns
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         manual_adjustments, old_balance, total_balance,
+                         future_bills)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    ON DUPLICATE KEY UPDATE
+                        manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
+                    targetDate, -payAmount, parseFloat(shop.balance), newBalance]);
+            } else {
+                // CASH / DUAL: update collection columns
+                const { cash_amount, upi_amount, cheque_amount } = req.body;
+                const dashboardBalance = newBalance;
 
-            // Use split logic if provided, else fallback to full amount as cash
-            const c = cash_amount !== undefined ? parseFloat(cash_amount) : payAmount;
-            const u = parseFloat(upi_amount) || 0;
-            const q = parseFloat(cheque_amount) || 0;
+                // Use split logic if provided, else fallback to full amount as cash
+                const c = cash_amount !== undefined ? parseFloat(cash_amount) : payAmount;
+                const u = parseFloat(upi_amount) || 0;
+                const q = parseFloat(cheque_amount) || 0;
 
-            await connection.query(`
-                INSERT INTO daily_collections
-                    (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     cash_collected, upi_collected, cheque_collected, old_balance, total_balance,
-                     future_bills, manual_adjustments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                ON DUPLICATE KEY UPDATE
-                    cash_collected = cash_collected + VALUES(cash_collected),
-                    upi_collected = upi_collected + VALUES(upi_collected),
-                    cheque_collected = cheque_collected + VALUES(cheque_collected),
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
-                targetDate, c, u, q, parseFloat(shop.balance), dashboardBalance]);
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         cash_collected, upi_collected, cheque_collected, old_balance, total_balance,
+                         future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        cash_collected = cash_collected + VALUES(cash_collected),
+                        upi_collected = upi_collected + VALUES(upi_collected),
+                        cheque_collected = cheque_collected + VALUES(cheque_collected),
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
+                    targetDate, c, u, q, parseFloat(shop.balance), dashboardBalance]);
+            }
 
             // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
-            await rebuildRipple(connection, id, targetDate);
+            await financialService.rebuildRipple(connection, id, targetDate);
         }
 
         await connection.commit();
@@ -598,14 +576,20 @@ const adjustBalance = async (req, res) => {
 
         // ── APPROVAL LOGIC ──
         const isCash = (payment_method || '').toUpperCase() === 'CASH';
-        const approvalStatus = isCash ? 'APPROVED' : 'PENDING';
-        const affectsBalance = isCash;
+        const isDiscount = (payment_method || '').toUpperCase() === 'DISCOUNT';
+        const approvalStatus = (isCash || isDiscount) ? 'APPROVED' : 'PENDING';
+        const affectsBalance = isCash || isDiscount;
 
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d') as today");
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
         // Use caller-provided date for retroactive entries; fall back to today
         const targetDate = collection_date || todayIST;
-        const mysqlDate = collection_date ? new Date(`${collection_date}T12:00:00+05:30`) : new Date();
+        // Build transaction_date: past date + actual current IST time (so ledger shows real action time)
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS in IST
+        const mysqlDate = collection_date
+            ? `${collection_date} ${currentISTTime}`   // past date + current IST time
+            : istNow.toISOString().slice(0, 19).replace('T', ' '); // full current IST datetime
 
         const newBalance = affectsBalance ? currentBalance + adjAmount : currentBalance;
 
@@ -647,7 +631,7 @@ const adjustBalance = async (req, res) => {
             `, [id, shop.shop_name, shop.village_name, shopOrderLineId, targetDate, adjAmount, parseFloat(shop.balance), newBalance]);
 
             // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
-            await rebuildRipple(connection, id, targetDate);
+            await financialService.rebuildRipple(connection, id, targetDate);
         }
 
         await connection.commit();
@@ -669,7 +653,7 @@ const adjustBalance = async (req, res) => {
             });
         }
         res.json({ 
-            message: isCash ? 'Balance adjusted successfully' : 'Adjustment submitted for Admin approval', 
+            message: (isCash || isDiscount) ? 'Balance adjusted successfully' : 'Adjustment submitted for Admin approval', 
             new_balance: newBalance,
             status: approvalStatus
         });
@@ -730,16 +714,19 @@ const approveTransaction = async (req, res) => {
             [tx.shop_id, newBalance]
         );
 
-        // 4. Update Transaction status
+        // 4. Update Transaction status (use explicit IST timestamp)
+        const istApproveTime = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const istApproveStr = istApproveTime.toISOString().slice(0, 19).replace('T', ' ');
         await connection.query(
             `UPDATE shop_transactions SET 
              approval_status = 'APPROVED', 
              affects_balance = TRUE, 
              balance_after = ?, 
              approved_by = ?, 
-             approved_at = NOW() 
+             approved_at = ?,
+             transaction_date = ? 
              WHERE id = ?`,
-            [newBalance, actingUserName, tx_id]
+            [newBalance, actingUserName, istApproveStr, istApproveStr, tx_id]
         );
 
         // 5. Update daily_collections
@@ -773,7 +760,7 @@ const approveTransaction = async (req, res) => {
         }
 
         // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
-        await rebuildRipple(connection, tx.shop_id, txDate);
+        await financialService.rebuildRipple(connection, tx.shop_id, txDate);
 
         await connection.commit();
 
@@ -828,11 +815,42 @@ const repairShopRipple = async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
-        await rebuildRipple(connection, id, fromDate);
+        await financialService.rebuildRipple(connection, id, fromDate);
         await connection.commit();
         res.json({ message: `Ripple rebuilt for shop ${id} from ${fromDate}` });
     } catch (err) {
         await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        connection.release();
+    }
+};
+
+const repairAllShopsRipple = async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+        const [shops] = await connection.query('SELECT id, shop_name FROM shops');
+        console.log(`[REPAIR] Starting global repair for ${shops.length} shops`);
+
+        for (const shop of shops) {
+            await connection.beginTransaction();
+            try {
+                // Find earliest transaction
+                const [firstTx] = await connection.query(
+                    'SELECT MIN(transaction_date) as start_date FROM shop_transactions WHERE shop_id = ?',
+                    [shop.id]
+                );
+                const startDate = firstTx[0].start_date || '2000-01-01';
+                
+                await financialService.rebuildRipple(connection, shop.id, startDate);
+                await connection.commit();
+            } catch (err) {
+                await connection.rollback();
+                console.error(`Failed to repair shop ${shop.id}:`, err.message);
+            }
+        }
+        res.json({ message: `Repair complete for ${shops.length} shops` });
+    } catch (err) {
         res.status(500).json({ error: err.message });
     } finally {
         connection.release();
@@ -851,5 +869,6 @@ module.exports = {
     syncAllShopsToLedger,
     approveTransaction,
     rejectTransaction,
-    repairShopRipple
+    repairShopRipple,
+    repairAllShopsRipple
 };

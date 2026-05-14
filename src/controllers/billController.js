@@ -371,18 +371,12 @@ exports.deleteBill = async (req, res) => {
             const amount = parseFloat(bill.total_amount);
             
             // Only reverse balance if it was already applied
-            let newBalance = parseFloat(shop.balance);
             if (bill.is_applied_to_balance) {
-                newBalance -= amount;
-                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
-                
-                // 4. Create "Cancellation" Ledger Entry
-                const istTime = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-                const mysqlDate = istTime.toISOString().slice(0, 19).replace('T', ' ');
-
+                // DELETE the original transaction to fully wipe it from the ledger, preventing
+                // rebuildRipple from re-aggregating it into 'todays_bill_amount'.
                 await connection.query(
-                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                    [shop.id, 'Adjustment', -amount, id, `Cancelled Invoice #${bill.invoice_no}`, newBalance, actingUserName, mysqlDate]
+                    'DELETE FROM shop_transactions WHERE shop_id = ? AND reference_id = ? AND type = ?',
+                    [shop.id, id, 'Bill']
                 );
             }
 
@@ -395,7 +389,7 @@ exports.deleteBill = async (req, res) => {
                 amount: -amount,
                 description: `Cancelled Invoice #${bill.invoice_no}`,
                 balance_before: parseFloat(shop.balance),
-                balance_after: newBalance,
+                balance_after: parseFloat(shop.balance) - amount,
                 created_by: actingUserName
             });
 

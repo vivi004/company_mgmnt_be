@@ -8,11 +8,9 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
     // Helper to get YYYY-MM-DD in IST
     const toISTDate = (date) => {
-        const d = new Date(date);
-        // If it's already a Date object from MySQL, it might be in UTC. 
-        // We add 5.5 hours to ensure we're looking at the IST day.
-        const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
-        return ist.toISOString().split('T')[0];
+        const d = typeof date === 'string' ? new Date(date) : date;
+        // Format to YYYY-MM-DD in Asia/Kolkata timezone
+        return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     };
 
     // 1. Get the starting balance before this date

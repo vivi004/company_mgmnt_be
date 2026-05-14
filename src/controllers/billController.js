@@ -144,7 +144,9 @@ exports.createBill = async (req, res) => {
 
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
-        const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : todayStr;
+        
+        const billDateOnly = mysqlDate.split(' ')[0];
+        const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : billDateOnly;
         const isFutureBill = deliveryDateOnly > todayStr;
 
         // ── BALANCE APPLICATION ──

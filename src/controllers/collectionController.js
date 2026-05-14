@@ -77,7 +77,8 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
                 
                 -- APPROVED Manual Adjustment Breakdown
-                COALESCE(adj.discount_amount, 0) AS discount_amount,
+                COALESCE(adj.discount_payment, 0) AS discount_payment,
+                COALESCE(adj.discount_adjustment, 0) AS discount_adjustment,
                 COALESCE(adj.m_cash, 0) AS manual_cash,
                 COALESCE(adj.m_upi, 0) AS manual_upi,
                 COALESCE(adj.m_cheque, 0) AS manual_cheque,
@@ -110,13 +111,14 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             LEFT JOIN (
                 SELECT 
                     shop_id,
-                    SUM(CASE WHEN payment_mode = 'DISCOUNT' THEN amount ELSE 0 END) as discount_amount,
+                    SUM(CASE WHEN type = 'Payment' AND payment_mode = 'DISCOUNT' THEN amount ELSE 0 END) as discount_payment,
+                    SUM(CASE WHEN type = 'Adjustment' AND payment_mode = 'DISCOUNT' THEN ABS(amount) ELSE 0 END) as discount_adjustment,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CASH' THEN ABS(amount) ELSE 0 END) as m_cash,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'UPI' THEN ABS(amount) ELSE 0 END) as m_upi,
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
                     SUM(CASE WHEN amount > 0 AND type = 'Adjustment' THEN amount ELSE 0 END) as m_pos
                 FROM shop_transactions
-                WHERE approval_status = 'APPROVED' AND DATE(transaction_date) = ?
+                WHERE approval_status = 'APPROVED' AND DATE(CONVERT_TZ(transaction_date, '+00:00', '+05:30')) = ?
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
             LEFT JOIN (

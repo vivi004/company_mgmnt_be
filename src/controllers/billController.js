@@ -166,17 +166,34 @@ exports.createBill = async (req, res) => {
             [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, isAppliedNow]
         );
 
-        // 7. Create Shop Transaction (Ledger Entry)
-        await connection.query(
-            'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDate]
-        );
-
         // 8. Increment the next invoice number
         await connection.query(
             'UPDATE app_settings SET next_invoice_no = next_invoice_no + 1, last_invoice_no = ? WHERE id = 1',
             [assignedInvoiceNo]
         );
+
+        if (!isFutureBill) {
+            // 7. Create Shop Transaction (Ledger Entry)
+            await connection.query(
+                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDate]
+            );
+
+            // Push to Webhook (Google Sheets)
+            webhookService.sendTransactionToWebhook({
+                shop_id: shop.id,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                specific_area: shop.specific_area || '',
+                type: 'Bill',
+                amount: amount,
+                description: `Invoice #${assignedInvoiceNo}`,
+                balance_before: shop.balance,
+                balance_after: finalBalance,
+                created_by: created_by || 'Staff',
+                reference_id: billResult.insertId
+            });
+        }
 
         // 8b. Update daily_collections
         const shopOrderLineId = shop.order_line_id;
@@ -225,26 +242,14 @@ exports.createBill = async (req, res) => {
 
         await connection.commit();
 
-        // 9. Push to Webhook (Background)
-        webhookService.sendTransactionToWebhook({
-            shop_id: shop.id,
-            shop_name: shop.shop_name,
-            village_name: shop.village_name,
-            specific_area: shop.specific_area || '',
-            type: 'Bill',
-            amount: amount,
-            description: `Invoice #${assignedInvoiceNo}`,
-            balance_before: shop.balance,
-            balance_after: finalBalance,
-            created_by: created_by || 'Staff',
-            reference_id: billResult.insertId
-        });
+        // Webhook moved inside !isFutureBill block above
 
         res.status(201).json({
-            message: 'Bill created successfully',
+            message: isFutureBill ? `Bill scheduled for delivery on ${deliveryDateOnly}` : 'Bill created and applied to balance successfully',
             id: billResult.insertId,
             invoice_no: assignedInvoiceNo,
-            new_balance: finalBalance
+            new_balance: finalBalance,
+            is_deferred: isFutureBill
         });
     } catch (err) {
         if (connection) await connection.rollback();

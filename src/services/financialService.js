@@ -34,6 +34,8 @@ async function rebuildRipple(connection, shopId, targetDate) {
         runningBalance = shopInfo.length > 0 ? parseFloat(shopInfo[0].opening_balance) : 0;
     }
 
+    const initialBalance = runningBalance;
+
     // 2. Fetch all transactions from targetDate onwards
     const [transactions] = await connection.query(
         `SELECT * FROM shop_transactions 
@@ -109,7 +111,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
         [shopId, targetDate]
     );
     
-    let lastDayTotal = prevDay.length > 0 ? parseFloat(prevDay[0].total_balance) : (prevTx.length > 0 ? parseFloat(prevTx[0].balance_after) : runningBalance);
+    let lastDayTotal = prevDay.length > 0 ? parseFloat(prevDay[0].total_balance) : (prevTx.length > 0 ? parseFloat(prevTx[0].balance_after) : initialBalance);
 
     for (const d of dates) {
         const dStr = toISTDate(d.collection_date);

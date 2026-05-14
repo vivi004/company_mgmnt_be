@@ -26,16 +26,8 @@ async function repairAll() {
                 
                 await connection.beginTransaction();
                 
-                // Find the earliest transaction date for this shop
-                const [firstTx] = await connection.query(
-                    'SELECT MIN(transaction_date) as start_date FROM shop_transactions WHERE shop_id = ?',
-                    [shop.id]
-                );
-
-                const startDate = firstTx[0].start_date || '2000-01-01'; // Fallback to far past
-                
-                // Run the master ripple from the beginning of time
-                await financialService.rebuildRipple(connection, shop.id, startDate);
+                // Run the master ripple from the beginning of time to ensure 100% integrity
+                await financialService.rebuildRipple(connection, shop.id, '2000-01-01');
                 
                 await connection.commit();
                 console.log(`Successfully repaired ${shop.shop_name}`);

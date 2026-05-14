@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 const financialService = require('./financialService');
+const webhookService = require('./webhookService');
 
 /**
  * Helper: Get current IST date string (YYYY-MM-DD)
@@ -139,6 +140,21 @@ async function applyDueBills() {
                     'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
                     [bill.id]
                 );
+
+                // 6. Push to Ledger (Google Sheets)
+                webhookService.sendTransactionToWebhook({
+                    shop_id: bill.shop_id,
+                    shop_name: bill.shop_name,
+                    village_name: bill.village_name,
+                    specific_area: bill.specific_area || '',
+                    type: 'Bill',
+                    amount: amount,
+                    description: `Delivery Due — Invoice Applied`,
+                    balance_before: bill.current_balance,
+                    balance_after: newBalance,
+                    created_by: bill.created_by || 'System',
+                    reference_id: bill.id
+                });
 
                 // 6. MASTER SYNC: Ripple forward from today
                 await financialService.rebuildRipple(connection, bill.shop_id, todayIST);

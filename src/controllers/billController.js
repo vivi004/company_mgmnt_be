@@ -446,7 +446,7 @@ exports.deleteBill = async (req, res) => {
 
 exports.updateBill = async (req, res) => {
     const { id } = req.params;
-    const { cart, custom_rates, total_amount, is_edited_price, isEditedPrice, delivery_date } = req.body;
+    const { cart, custom_rates, total_amount, is_edited_price } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -475,94 +475,155 @@ exports.updateBill = async (req, res) => {
         const newAmount = total_amount !== undefined ? parseFloat(total_amount) : oldAmount;
         const diff = newAmount - oldAmount;
 
-        // 3. Update ledger/balance if there's a difference
-        const newCartJson = JSON.stringify(cart || bill.cart);
-        const newRatesJson = JSON.stringify(custom_rates || bill.custom_rates);
+        // 3. Update shop balance if there's a difference
+        let shopId = null;
+        if (diff !== 0) {
+            const [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance 
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
+            `, [bill.shop_name, bill.village_name]);
+            
+            if (shops.length > 0) {
+                const shop = shops[0];
+                shopId = shop.id;
+                const newBalance = parseFloat(shop.balance) + diff;
+                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
 
-        // 3. Delivery Date Handling
+                // 4. Create Ledger Entry for adjustment
+                await connection.query(
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [shop.id, 'Adjustment', diff, id, `Update Invoice #${bill.invoice_no}`, newBalance, actingUserName]
+                );
+
+                // 5. Push to Webhook
+                webhookService.sendTransactionToWebhook({
+                    shop_id: shop.id,
+                    shop_name: bill.shop_name,
+                    village_name: bill.village_name,
+                    type: 'Adjustment',
+                    amount: diff,
+                    description: `Update Invoice #${bill.invoice_no}`,
+                    balance_before: parseFloat(shop.balance),
+                    balance_after: newBalance,
+                    created_by: actingUserName
+                });
+            }
+        }
+
+        // 6. Delivery Date Handling
         let mysqlDeliveryDate = bill.delivery_date ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') : null;
-        if (delivery_date) {
+        if (req.body.delivery_date) {
             try {
-                const d = new Date(delivery_date);
+                const d = new Date(req.body.delivery_date);
                 if (!isNaN(d.getTime())) {
                     const istD = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
                     mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
                 }
             } catch (e) { }
         }
-        const oldDateStr = bill.delivery_date_str || bill.bill_date_str;
-        const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
 
-        // 4. Update the Bill Record IMMEDIATELY (so ripple sees it)
-        await connection.query(
-            'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ?, is_edited_price = ? WHERE id = ?',
-            [newCartJson, newRatesJson, newAmount, mysqlDeliveryDate || bill.bill_date_str, isEditedPrice ?? false, id]
-        );
+        // 6b. Update daily_collections
+        // Fetch shop details for collections (needed for order_line_id)
+        // 3. Get shop details (Try ID first, then fallback to name for legacy bills)
+        let [collShops] = await connection.query('SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE id = ? FOR UPDATE', [bill.shop_id]);
+        if (collShops.length === 0) {
+            [collShops] = await connection.query(
+                'SELECT id, balance, order_line_id, shop_name, village_name FROM shops WHERE TRIM(shop_name) = TRIM(?) AND TRIM(village_name) = TRIM(?) FOR UPDATE',
+                [bill.shop_name, bill.village_name]
+            );
+        }
+        const collShop = collShops[0];
 
-        // 5. User attribution is already handled in step 1b
+        if (collShop) {
+            const oldDateStr = bill.delivery_date_str || bill.bill_date_str;
+            const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
+            const [todayDateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+            const todayStrUpd = todayDateRows[0].today;
 
-        // 6. Handle Ledger & Balance (only if applied to balance)
-        console.log(`[SYNC] Bill #${id} is_applied: ${bill.is_applied_to_balance}, diff: ${diff}`);
-        if (bill.is_applied_to_balance) {
-            // Get current shop info (with lock)
-            const [shops] = await connection.query(`
-                SELECT s.id, COALESCE(sb.balance, 0) as balance 
-                FROM shops s
-                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
-                WHERE s.id = ? FOR UPDATE
-            `, [bill.shop_id]);
-            
-            console.log(`[SYNC] Shop lookup for #${bill.shop_id} found ${shops.length} rows`);
-            if (shops.length > 0) {
-                const shop = shops[0];
-                const newBalance = parseFloat(shop.balance) + diff;
-                await connection.query('INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)', [shop.id, newBalance]);
+            if (oldDateStr !== newDateStr) {
+                // CASE 1: Date changed (with or without price change)
+                
+                // 1. Remove OLD amount from OLD date row
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
+                        total_balance = GREATEST(0, total_balance - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [oldAmount, oldAmount, collShop.id, oldDateStr]);
 
-                // Update existing Bill transaction OR create Adjustment if missing
-                const [existingTx] = await connection.query(
-                    'SELECT id FROM shop_transactions WHERE shop_id = ? AND reference_id = ? AND type = "Bill" LIMIT 1',
-                    [shop.id, id]
-                );
+                // 2. Add NEW amount to NEW date row
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                        total_balance = total_balance + VALUES(todays_bill_amount)
+                `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr,
+                    newAmount, parseFloat(collShop.balance) - diff, parseFloat(collShop.balance) + newAmount]);
 
-                console.log(`[SYNC] Ledger search for Shop #${shop.id}, Bill #${id} found TX: ${existingTx.length > 0 ? existingTx[0].id : 'NONE'}`);
-
-                if (existingTx.length > 0) {
-                    await connection.query(
-                        'UPDATE shop_transactions SET amount = ?, transaction_date = ? WHERE id = ?',
-                        [newAmount, mysqlDeliveryDate || bill.bill_date_str, existingTx[0].id]
-                    );
-                    console.log(`[SYNC] Updated Bill TX #${existingTx[0].id} to ₹${newAmount}`);
-                } else {
-                    await connection.query(
-                        'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                        [shop.id, 'Adjustment', diff, id, `Bill Update #${bill.invoice_no}`, newBalance, actingUserName, mysqlDeliveryDate || bill.bill_date_str]
-                    );
-                    console.log(`[SYNC] Created Adjustment TX for diff ₹${diff}`);
+                // 3. Sync 'future_bills' if old date was future
+                if (oldDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = GREATEST(0, future_bills - ?)
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [oldAmount, collShop.id, todayStrUpd]);
+                }
+                
+                // 4. Sync 'future_bills' if new date is future
+                if (newDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = future_bills + ?
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [newAmount, collShop.id, todayStrUpd]);
                 }
 
-                // Push to Webhook
-                webhookService.sendTransactionToWebhook({
-                    shop_id: shop.id,
-                    shop_name: bill.shop_name,
-                    village_name: bill.village_name,
-                    type: existingTx.length > 0 ? 'Bill' : 'Adjustment',
-                    amount: existingTx.length > 0 ? newAmount : diff,
-                    description: `Updated Bill #${bill.invoice_no}`,
-                    balance_after: newBalance,
-                    created_by: actingUserName,
-                    date: mysqlDeliveryDate || bill.bill_date_str
-                });
+                // MASTER SYNC: Heal the ledger starting from the earliest changed date
+                const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
+                await financialService.rebuildRipple(connection, collShop.id, earliestDate);
+
+            } else if (diff !== 0) {
+                // CASE 2: Same date, just price changed
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET todays_bill_amount = todays_bill_amount + ?,
+                        total_balance = total_balance + ?
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [diff, diff, collShop.id, newDateStr]);
+
+                // If date is future, also update future_bills column for today
+                if (newDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = future_bills + ?
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [diff, collShop.id, todayStrUpd]);
+                }
+
+                // MASTER SYNC: Heal the ledger starting from the bill date
+                await financialService.rebuildRipple(connection, collShop.id, newDateStr);
             }
         }
 
-        // 7. Master Ripple Reconciliation (Heals both shop_transactions and daily_collections)
-        const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
-        console.log(`[SYNC] Triggering ripple for Shop #${bill.shop_id} from ${earliestDate}`);
-        await financialService.rebuildRipple(connection, bill.shop_id, earliestDate);
+        await connection.query(
+            'UPDATE bills SET cart = ?, custom_rates = ?, total_amount = ?, delivery_date = ?, is_edited_price = ? WHERE id = ?',
+            [
+                JSON.stringify(cart !== undefined ? cart : bill.cart), 
+                JSON.stringify(custom_rates !== undefined ? custom_rates : bill.custom_rates), 
+                newAmount, 
+                mysqlDeliveryDate, 
+                is_edited_price !== undefined ? (is_edited_price ? 1 : 0) : bill.is_edited_price,
+                id
+            ]
+        );
 
         await connection.commit();
-        console.log(`[SYNC] Transaction committed for Bill #${id}`);
-        res.json({ message: 'Bill updated and ledger reconciled successfully' });
+        res.json({ message: 'Bill updated and balance adjusted successfully' });
     } catch (err) {
         if (connection) await connection.rollback();
         console.error('Error updating bill:', err);

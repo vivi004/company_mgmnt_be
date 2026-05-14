@@ -210,7 +210,7 @@ exports.createBill = async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0)
                 ON DUPLICATE KEY UPDATE
                     todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                    total_balance = total_balance + VALUES(todays_bill_amount)
             `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId,
                 deliveryDateOnly, amount, amount]);
 
@@ -234,7 +234,7 @@ exports.createBill = async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                 ON DUPLICATE KEY UPDATE
                     todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                    total_balance = total_balance + VALUES(todays_bill_amount)
             `, [shop.id, shop.shop_name, shop.village_name, shopOrderLineId,
                 deliveryDateOnly, amount, parseFloat(shop.balance) - amount, finalBalance]);
 
@@ -404,7 +404,7 @@ exports.deleteBill = async (req, res) => {
                 await connection.query(`
                     UPDATE daily_collections
                     SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
-                        total_balance = old_balance + GREATEST(0, todays_bill_amount - ?) - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                        total_balance = GREATEST(0, total_balance - ?)
                     WHERE shop_id = ? AND collection_date = ?
                 `, [amount, amount, shop.id, delDateStr]);
 
@@ -543,15 +543,17 @@ exports.updateBill = async (req, res) => {
             const todayStrUpd = todayDateRows[0].today;
 
             if (oldDateStr !== newDateStr) {
-                // Date changed: remove from old date row
+                // CASE 1: Date changed (with or without price change)
+                
+                // 1. Remove OLD amount from OLD date row
                 await connection.query(`
                     UPDATE daily_collections
                     SET todays_bill_amount = GREATEST(0, todays_bill_amount - ?),
-                        total_balance = old_balance + GREATEST(0, todays_bill_amount - ?) - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                        total_balance = GREATEST(0, total_balance - ?)
                     WHERE shop_id = ? AND collection_date = ?
                 `, [oldAmount, oldAmount, collShop.id, oldDateStr]);
 
-                // Add to new date row
+                // 2. Add NEW amount to NEW date row
                 await connection.query(`
                     INSERT INTO daily_collections
                         (shop_id, shop_name, village_name, order_line_id, collection_date,
@@ -559,11 +561,11 @@ exports.updateBill = async (req, res) => {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                     ON DUPLICATE KEY UPDATE
                         todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                        total_balance = total_balance + VALUES(todays_bill_amount)
                 `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr,
-                    newAmount, parseFloat(collShop.balance), parseFloat(collShop.balance) + newAmount]);
+                    newAmount, parseFloat(collShop.balance) - diff, parseFloat(collShop.balance) + newAmount]);
 
-                // If old date was future, also clean up today's future_bills
+                // 3. Sync 'future_bills' if old date was future
                 if (oldDateStr > todayStrUpd) {
                     await connection.query(`
                         UPDATE daily_collections
@@ -571,7 +573,8 @@ exports.updateBill = async (req, res) => {
                         WHERE shop_id = ? AND collection_date = ?
                     `, [oldAmount, collShop.id, todayStrUpd]);
                 }
-                // If new date is future, add to today's future_bills
+                
+                // 4. Sync 'future_bills' if new date is future
                 if (newDateStr > todayStrUpd) {
                     await connection.query(`
                         UPDATE daily_collections
@@ -583,14 +586,24 @@ exports.updateBill = async (req, res) => {
                 // MASTER SYNC: Heal the ledger starting from the earliest changed date
                 const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
                 await financialService.rebuildRipple(connection, collShop.id, earliestDate);
+
             } else if (diff !== 0) {
-                // Same date, just update amount difference
+                // CASE 2: Same date, just price changed
                 await connection.query(`
                     UPDATE daily_collections
                     SET todays_bill_amount = todays_bill_amount + ?,
-                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                        total_balance = total_balance + ?
                     WHERE shop_id = ? AND collection_date = ?
-                `, [diff, collShop.id, newDateStr]);
+                `, [diff, diff, collShop.id, newDateStr]);
+
+                // If date is future, also update future_bills column for today
+                if (newDateStr > todayStrUpd) {
+                    await connection.query(`
+                        UPDATE daily_collections
+                        SET future_bills = future_bills + ?
+                        WHERE shop_id = ? AND collection_date = ?
+                    `, [diff, collShop.id, todayStrUpd]);
+                }
 
                 // MASTER SYNC: Heal the ledger starting from the bill date
                 await financialService.rebuildRipple(connection, collShop.id, newDateStr);

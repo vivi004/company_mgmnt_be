@@ -678,16 +678,12 @@ const approveTransaction = async (req, res) => {
         } catch (e) {}
     }
 
-    // Retry up to 3 times on deadlock (ER_LOCK_DEADLOCK)
-    const MAX_RETRIES = 3;
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
         // 1. Get Transaction
         const [txs] = await connection.query('SELECT * FROM shop_transactions WHERE id = ? FOR UPDATE', [tx_id]);
-
         if (txs.length === 0) return res.status(404).json({ error: 'Transaction not found' });
         const tx = txs[0];
 
@@ -732,15 +728,38 @@ const approveTransaction = async (req, res) => {
             [newBalance, actingUserName, istApproveStr, tx_id]
         );
 
-        // 5. daily_collections is handled entirely by rebuildRipple below.
-        // Do NOT manually INSERT here — rebuildRipple recalculates all rows
-        // from the target date onwards atomically.
-        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(?, '+00:00', '+05:30'), '%Y-%m-%d') as tx_date", [tx.transaction_date]);
+        // 5. Update daily_collections
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
         const txDate = dateRows[0].tx_date;
+
+        if (isPayment) {
+            const payMethod = (tx.payment_mode || 'Cash').toLowerCase();
+            const columnToUpdate = (payMethod.includes('upi') || payMethod.includes('gpay') || 
+                payMethod.includes('phonepe') || payMethod.includes('paytm')) ? 'upi_collected' : (payMethod.includes('cheque') || payMethod.includes('check') ? 'cheque_collected' : 'cash_collected');
+
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     ${columnToUpdate}, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON DUPLICATE KEY UPDATE
+                    ${columnToUpdate} = ${columnToUpdate} + VALUES(${columnToUpdate}),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [tx.shop_id, shop.shop_name, shop.village_name, shop.order_line_id, txDate, amount, currentBalance, newBalance]);
+        } else {
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     manual_adjustments, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [tx.shop_id, shop.shop_name, shop.village_name, shop.order_line_id, txDate, amount, currentBalance, newBalance]);
+        }
 
         // SOURCE-OF-TRUTH RIPPLE: recalculate all future rows from actual total_balance
         await financialService.rebuildRipple(connection, tx.shop_id, txDate);
-
 
         await connection.commit();
 
@@ -760,26 +779,12 @@ const approveTransaction = async (req, res) => {
         });
 
         res.json({ message: 'Transaction approved', new_balance: newBalance });
-        return; // success — exit retry loop
     } catch (err) {
         if (connection) await connection.rollback();
-
-        // Retry on deadlock
-        if (err.code === 'ER_LOCK_DEADLOCK' && attempt < MAX_RETRIES) {
-            console.warn(`[APPROVE] Deadlock on attempt ${attempt}, retrying...`);
-            await new Promise(r => setTimeout(r, 100 * attempt)); // back-off: 100ms, 200ms
-            continue;
-        }
-
-        // Already responded (e.g. 404/400 from early return) — don't double-send
-        if (!res.headersSent) {
-            res.status(500).json({ error: err.message });
-        }
-        return;
+        res.status(500).json({ error: err.message });
     } finally {
         if (connection) connection.release();
     }
-    } // end retry loop
 };
 
 const rejectTransaction = async (req, res) => {

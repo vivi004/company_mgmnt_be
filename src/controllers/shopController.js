@@ -678,12 +678,16 @@ const approveTransaction = async (req, res) => {
         } catch (e) {}
     }
 
+    // Retry up to 3 times on deadlock (ER_LOCK_DEADLOCK)
+    const MAX_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
         // 1. Get Transaction
         const [txs] = await connection.query('SELECT * FROM shop_transactions WHERE id = ? FOR UPDATE', [tx_id]);
+
         if (txs.length === 0) return res.status(404).json({ error: 'Transaction not found' });
         const tx = txs[0];
 
@@ -756,12 +760,26 @@ const approveTransaction = async (req, res) => {
         });
 
         res.json({ message: 'Transaction approved', new_balance: newBalance });
+        return; // success — exit retry loop
     } catch (err) {
         if (connection) await connection.rollback();
-        res.status(500).json({ error: err.message });
+
+        // Retry on deadlock
+        if (err.code === 'ER_LOCK_DEADLOCK' && attempt < MAX_RETRIES) {
+            console.warn(`[APPROVE] Deadlock on attempt ${attempt}, retrying...`);
+            await new Promise(r => setTimeout(r, 100 * attempt)); // back-off: 100ms, 200ms
+            continue;
+        }
+
+        // Already responded (e.g. 404/400 from early return) — don't double-send
+        if (!res.headersSent) {
+            res.status(500).json({ error: err.message });
+        }
+        return;
     } finally {
         if (connection) connection.release();
     }
+    } // end retry loop
 };
 
 const rejectTransaction = async (req, res) => {

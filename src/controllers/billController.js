@@ -266,8 +266,15 @@ exports.createBill = async (req, res) => {
 };
 
 exports.getAllBills = async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200); // max 200 per page
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const offset = (page - 1) * limit;
     try {
-        // Primary ledger = only verified bills
+        // Count total (cheap, uses index)
+        const [[{ total }]] = await db.query(
+            'SELECT COUNT(*) as total FROM bills WHERE status = "Verified"'
+        );
+
         const [rows] = await db.query(`
             SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
@@ -275,7 +282,8 @@ exports.getAllBills = async (req, res) => {
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Verified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
-        `);
+            LIMIT ? OFFSET ?
+        `, [limit, offset]);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -283,7 +291,7 @@ exports.getAllBills = async (req, res) => {
             try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
             return { ...row, cart, custom_rates };
         });
-        res.json(mapped);
+        res.json({ data: mapped, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (err) {
         console.error('Error fetching bills:', err.message || err);
         res.status(500).json({ error: 'Failed to fetch bills', detail: err.message });
@@ -291,7 +299,14 @@ exports.getAllBills = async (req, res) => {
 };
 
 exports.getUnverifiedBills = async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const offset = (page - 1) * limit;
     try {
+        const [[{ total }]] = await db.query(
+            'SELECT COUNT(*) as total FROM bills WHERE status = "Unverified"'
+        );
+
         const [rows] = await db.query(`
             SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
@@ -299,7 +314,8 @@ exports.getUnverifiedBills = async (req, res) => {
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Unverified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
-        `);
+            LIMIT ? OFFSET ?
+        `, [limit, offset]);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -307,7 +323,7 @@ exports.getUnverifiedBills = async (req, res) => {
             try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
             return { ...row, cart, custom_rates };
         });
-        res.json(mapped);
+        res.json({ data: mapped, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (err) {
         console.error('Error fetching unverified bills:', err.message || err);
         res.status(500).json({ error: 'Failed to fetch unverified bills', detail: err.message });

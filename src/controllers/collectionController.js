@@ -65,6 +65,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 s.id AS shop_id,
                 s.shop_name,
                 s.village_name,
+                s.owner_name AS owner_name,
                 s.order_line_id,
                 ? AS collection_date,
                 ol.name AS order_line_name,

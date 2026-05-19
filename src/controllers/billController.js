@@ -139,9 +139,30 @@ exports.createBill = async (req, res) => {
         }
 
         // 5. Handle Balance Application (Deferred if delivery date is in the future)
-        const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
+        const googleSheetSyncService = require('../services/googleSheetSyncService');
+        const latestRates = await googleSheetSyncService.getSafeRates();
+        const parsedCart = typeof cart === 'string' ? JSON.parse(cart) : cart;
+
+        let calculatedTotal = 0;
+        const validatedCart = parsedCart.map(item => {
+            // Override or fallback rates using the backend MySQL validated cache
+            const dbRate = latestRates[item.product_id] !== undefined ? latestRates[item.product_id] : (parseFloat(item.rate) || 0);
+            const rate = parseFloat(dbRate) || 0;
+            const quantity = parseFloat(item.quantity) || 0;
+            calculatedTotal += rate * quantity;
+            return {
+                ...item,
+                rate: rate,
+                price: rate,
+                total: rate * quantity
+            };
+        });
+
+        const cartJson = JSON.stringify(validatedCart);
         const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
-        const amount = parseFloat(total_amount) || 0;
+        
+        // Final secure total amount computed on the backend
+        const amount = calculatedTotal;
 
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
@@ -168,6 +189,14 @@ exports.createBill = async (req, res) => {
             'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, isAppliedNow]
         );
+
+        // 6. Store invoice rate snapshots for future-proofing historical records
+        for (const item of validatedCart) {
+            await connection.query(
+                'INSERT INTO invoice_rate_snapshot (bill_id, product_id, rate) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE rate = VALUES(rate)',
+                [billResult.insertId, item.product_id, item.rate]
+            );
+        }
 
         // 8. Increment the next invoice number
         await connection.query(

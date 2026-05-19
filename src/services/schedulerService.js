@@ -2,6 +2,8 @@ const cron = require('node-cron');
 const db = require('../config/db');
 const financialService = require('./financialService');
 const webhookService = require('./webhookService');
+const googleSheetSyncService = require('./googleSheetSyncService');
+const googleAuthService = require('./googleAuthService');
 
 /**
  * Helper: Get current IST date string (YYYY-MM-DD)
@@ -178,7 +180,7 @@ async function applyDueBills() {
  * Cron at 18:30 UTC = 00:00 IST daily.
  */
 function startScheduler() {
-    // 00:00 IST = 18:30 UTC → cron: '30 18 * * *'
+    // 1. Midnight IST Rollover (00:00 IST = 18:30 UTC)
     cron.schedule('30 18 * * *', async () => {
         console.log('[CRON] Midnight IST triggered.');
         await applyDueBills();      // Apply delivery-date bills first
@@ -188,6 +190,20 @@ function startScheduler() {
     });
 
     console.log('[SCHEDULER] Midnight IST rollover scheduled (18:30 UTC = 00:00 IST).');
+
+    // 2. Google Sheets Background Sync Scheduler: Runs every 10 minutes
+    cron.schedule('*/10 * * * *', async () => {
+        console.log('[CRON] 10-Minute Google Sheets Sync triggered.');
+        await googleSheetSyncService.syncGoogleSheetsRates();
+    });
+    console.log('[SCHEDULER] 10-minute Google Sheets Background Sync scheduled.');
+
+    // 3. Startup Actions: Validate Google Service Account credentials & run initial sync
+    setTimeout(async () => {
+        googleAuthService.validateCredentials();
+        console.log('[SCHEDULER] Executing initial Google Sheet Sync on server boot...');
+        await googleSheetSyncService.syncGoogleSheetsRates();
+    }, 2000);
 }
 
 module.exports = { startScheduler, runMidnightRollover, applyDueBills };

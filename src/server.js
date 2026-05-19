@@ -19,9 +19,18 @@ if (process.env.SENTRY_DSN) {
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-if (!process.env.JWT_SECRET) {
-    console.error('FATAL: JWT_SECRET is not defined in environment variables.');
+// 1b. Verify mandatory startup credentials & log missing configuration securely
+const requiredEnvVars = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'JWT_SECRET'];
+const missingVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+if (missingVars.length > 0) {
+    console.error(`\x1b[31m[CRITICAL STARTUP ERROR] Missing mandatory environment configurations: ${missingVars.join(', ')}\x1b[0m`);
+    if (process.env.SENTRY_DSN) {
+        Sentry.captureException(new Error(`Server failed to start due to missing environment variables: ${missingVars.join(', ')}`));
+    }
     process.exit(1);
+} else {
+    console.log('\x1b[32m[STARTUP SUCCESS] All mandatory environment credentials verified successfully.\x1b[0m');
 }
 
 // 2. Register Sentry Request Handler as the VERY first Express middleware
@@ -131,6 +140,16 @@ app.listen(PORT, async () => {
                 product_id VARCHAR(50) PRIMARY KEY,
                 rate DECIMAL(10, 2) NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Ensure sheet_backup table exists for zero-downtime rates recovery fallback
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sheet_backup (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                data LONGTEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_valid BOOLEAN DEFAULT TRUE
             )
         `);
 

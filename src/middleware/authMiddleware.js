@@ -32,6 +32,13 @@ const authMiddleware = async (req, res, next) => {
         req.user = decoded; // { id, role, iat, exp }
         next();
     } catch (err) {
+        if (err.name === 'JsonWebTokenError') {
+            console.warn('\x1b[33m[AUTH WARNING] JWT signature mismatch or tampering detected.\x1b[0m');
+        } else if (err.name === 'TokenExpiredError') {
+            console.log('[AUTH INFO] Token expired naturally.');
+        } else {
+            console.error('[AUTH ERROR] Token verification failed:', err.message);
+        }
         return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
     }
 };

@@ -113,12 +113,20 @@ exports.syncProductRates = async (req, res) => {
             console.log('[SYNC SUCCESS] Successfully backed up rates payload containing', Object.keys(rates).length, 'entries.');
         }
 
+        // Store global synchronization timestamp in Indian Standard Time (IST)
+        const syncTimeStr = new Date().toLocaleString('en-IN', { hour12: true, timeZone: 'Asia/Kolkata' });
+        await connection.query(
+            'UPDATE app_settings SET last_sheet_sync_time = ? WHERE id = 1',
+            [syncTimeStr]
+        );
+
         await connection.commit();
         res.json({ 
             success: true, 
             message: fallbackUsed ? 'Rates restored from latest valid backup due to empty payload' : 'Product rates synced to database successfully', 
             count: Object.keys(rates).length,
-            fallback_used: fallbackUsed
+            fallback_used: fallbackUsed,
+            last_sheet_sync_time: syncTimeStr
         });
     } catch (err) {
         if (connection) await connection.rollback();

@@ -22,15 +22,15 @@ const rawPool = mysql.createPool({
   
   // Connection Pool Optimizations for production scale
   waitForConnections: true,
-  connectionLimit: 15,          // Scale up concurrent connections safely
+  connectionLimit: 10,          // Scale down from 15 to 10 for Railway low-RAM/CPU optimization
   queueLimit: 0,                // Allow infinite queueing under high bursts
   timezone: '+05:30',
   
   // Timeouts & Keep-Alives to prevent Railway 502/restarts and cold delays
-  connectTimeout: 15000,        // 15 seconds to connect
-  acquireTimeout: 15000,        // 15 seconds to acquire a connection
+  connectTimeout: 10000,        // 10 seconds to connect
+  acquireTimeout: 10000,        // 10 seconds to acquire a connection
   enableKeepAlive: true,        // Prevent connection drop-offs by active TCP ping
-  keepAliveInitialDelay: 10000  // Ping every 10 seconds
+  keepAliveInitialDelay: 30000  // Ping every 30 seconds (reduces idle Railway CPU wakeups)
 });
 
 const promisePool = rawPool.promise();

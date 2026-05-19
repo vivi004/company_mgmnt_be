@@ -73,24 +73,8 @@ app.use('/api/collections', collectionRoutes);
 // 4. Uptime Monitoring Health Check Probe Endpoint (Lightweight & Safe)
 const db = require('./config/db');
 
-app.get('/health', async (req, res) => {
-    try {
-        // Lightweight database check (executes in 0.2ms with zero overhead)
-        await db.query('SELECT 1');
-        res.status(200).json({
-            status: 'ok',
-            database: 'connected',
-            timestamp: new Date().toISOString()
-        });
-    } catch (err) {
-        console.error('[HEALTH CHECK FAILED] Database disconnected:', err.message);
-        res.status(500).json({
-            status: 'error',
-            database: 'disconnected',
-            error: err.message,
-            timestamp: new Date().toISOString()
-        });
-    }
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
 });
 
 // Backward compatibility health check endpoint

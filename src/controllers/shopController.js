@@ -406,6 +406,7 @@ const collectPayment = async (req, res) => {
         const activeDebt = collRows.length > 0 ? parseFloat(collRows[0].total_balance) : currentBalance;
 
         if (payAmount > activeDebt + 0.01) {
+            await connection.rollback();
             return res.status(400).json({ 
                 message: `Invalid to collect future bill amount. Max collectible: ₹${activeDebt.toFixed(2)}` 
             });

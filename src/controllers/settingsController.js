@@ -19,6 +19,9 @@ const ensureSettings = async () => {
     try {
         await db.query("ALTER TABLE app_settings ADD COLUMN revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00'");
     } catch (e) {}
+    try {
+        await db.query("ALTER TABLE app_settings ADD COLUMN last_sheet_sync_time VARCHAR(100)");
+    } catch (e) {}
     // Insert default row if not present
     await db.query(`
         INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)
@@ -80,7 +83,7 @@ exports.getInvoiceSettings = async (req, res) => {
     try {
         await ensureSettings();
         await ensureShopsColumns(); // ensure phone/phone2 columns exist in shops
-        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url FROM app_settings WHERE id = 1');
+        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1');
         res.json(rows[0]);
     } catch (err) {
         console.error('Error getting invoice settings:', err);
@@ -89,9 +92,9 @@ exports.getInvoiceSettings = async (req, res) => {
 };
 
 // PUT /api/settings/invoice
-// Body: { next_invoice_no, last_invoice_no }
+// Body: { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time }
 exports.updateInvoiceSettings = async (req, res) => {
-    const { next_invoice_no, last_invoice_no, ledger_sheet_url } = req.body;
+    const { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time } = req.body;
     try {
         await ensureSettings();
         const fields = [];
@@ -99,6 +102,7 @@ exports.updateInvoiceSettings = async (req, res) => {
         if (next_invoice_no !== undefined) { fields.push('next_invoice_no = ?'); values.push(next_invoice_no); }
         if (last_invoice_no !== undefined) { fields.push('last_invoice_no = ?'); values.push(last_invoice_no); }
         if (ledger_sheet_url !== undefined) { fields.push('ledger_sheet_url = ?'); values.push(ledger_sheet_url); }
+        if (last_sheet_sync_time !== undefined) { fields.push('last_sheet_sync_time = ?'); values.push(last_sheet_sync_time); }
         if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
         await db.query(`UPDATE app_settings SET ${fields.join(', ')} WHERE id = 1`, values);
         res.json({ message: 'Invoice settings updated' });

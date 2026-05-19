@@ -1,26 +1,16 @@
 const db = require('../config/db');
-const cacheService = require('../services/cacheService');
-const googleSheetSyncService = require('../services/googleSheetSyncService');
 
 /**
  * Fetches all product rates stored in the database.
- * Returns a Record<product_id, rate>.
- * Fully cached in-memory for 15 minutes to prevent DB load.
+ * Returns a Record<product_id, rate>
  */
 exports.getProductRates = async (req, res) => {
     try {
-        const cacheKey = 'product_rates_cached';
-        const cached = cacheService.get(cacheKey);
-        
-        if (cached) {
-            return res.json(cached);
-        }
-
-        // Cache miss: load latest validated rates from sheet_cache fallback layer
-        const rates = await googleSheetSyncService.getSafeRates();
-        
-        // Cache rates for 15 minutes (900 seconds)
-        cacheService.set(cacheKey, rates, 900);
+        const [rows] = await db.query('SELECT product_id, rate FROM product_rates');
+        const rates = {};
+        rows.forEach(row => {
+            rates[row.product_id] = parseFloat(row.rate);
+        });
         res.json(rates);
     } catch (err) {
         console.error('Error fetching product rates:', err);
@@ -30,7 +20,7 @@ exports.getProductRates = async (req, res) => {
 
 /**
  * Saves/Updates product rates in the database.
- * Expects { rates: Record<product_id, rate> } in body.
+ * Expects { rates: Record<product_id, rate> } in body
  */
 exports.syncProductRates = async (req, res) => {
     const { rates } = req.body;
@@ -50,18 +40,9 @@ exports.syncProductRates = async (req, res) => {
                 'INSERT INTO product_rates (product_id, rate) VALUES (?, ?) ON DUPLICATE KEY UPDATE rate = ?',
                 [id, rate, rate]
             );
-
-            await connection.query(
-                'INSERT INTO sheet_cache (product_name, rate, is_valid) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE rate = ?, is_valid = 1',
-                [id, rate, rate]
-            );
         }
 
         await connection.commit();
-        
-        // Active Cache Invalidation on write
-        cacheService.flush();
-
         res.json({ 
             success: true, 
             message: 'Product rates synced to database successfully', 

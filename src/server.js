@@ -218,29 +218,6 @@ app.listen(PORT, async () => {
             }
         }
 
-        // Ensure sheet_cache table exists
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS sheet_cache (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                product_name VARCHAR(100) NOT NULL UNIQUE,
-                rate DECIMAL(10, 2) NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                is_valid TINYINT DEFAULT 1
-            )
-        `);
-
-        // Ensure invoice_rate_snapshot table exists
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS invoice_rate_snapshot (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                bill_id INT NOT NULL,
-                product_id VARCHAR(50) NOT NULL,
-                rate DECIMAL(10, 2) NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_bill_product (bill_id, product_id)
-            )
-        `);
-
         console.log('Database tables verified/initialized.');
     } catch (err) {
         console.error('Database initialization warning:', err.message);

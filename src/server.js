@@ -165,12 +165,22 @@ app.listen(PORT, async () => {
             { name: 'is_applied_to_balance', type: 'BOOLEAN DEFAULT FALSE' }
         ];
 
+        // Retrieve existing column list to prevent duplicate-column SQL exceptions
+        const [existingBillsCols] = await db.query(`
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bills'
+        `);
+        const billsColNames = existingBillsCols.map(c => c.COLUMN_NAME.toLowerCase());
+
         for (const col of billColumns) {
-            try {
-                await db.query(`ALTER TABLE bills ADD COLUMN ${col.name} ${col.type}`);
-                console.log(`Column '${col.name}' added to bills.`);
-            } catch (e) {
-                // Column likely exists, skip
+            if (!billsColNames.includes(col.name.toLowerCase())) {
+                try {
+                    await db.query(`ALTER TABLE bills ADD COLUMN ${col.name} ${col.type}`);
+                    console.log(`Column '${col.name}' added to bills.`);
+                } catch (e) {
+                    // Ignore transient error
+                }
             }
         }
 
@@ -212,12 +222,23 @@ app.listen(PORT, async () => {
             { name: 'future_bills', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
             { name: 'manual_adjustments', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
         ];
+
+        // Retrieve existing columns for daily_collections to prevent duplicate column exception logs
+        const [existingDcCols] = await db.query(`
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'daily_collections'
+        `);
+        const dcColNames = existingDcCols.map(c => c.COLUMN_NAME.toLowerCase());
+
         for (const col of dcColumns) {
-            try {
-                await db.query(`ALTER TABLE daily_collections ADD COLUMN ${col.name} ${col.type}`);
-                console.log(`Column '${col.name}' added to daily_collections.`);
-            } catch (e) {
-                // Column already exists, skip
+            if (!dcColNames.includes(col.name.toLowerCase())) {
+                try {
+                    await db.query(`ALTER TABLE daily_collections ADD COLUMN ${col.name} ${col.type}`);
+                    console.log(`Column '${col.name}' added to daily_collections.`);
+                } catch (e) {
+                    // Ignore transient error
+                }
             }
         }
 

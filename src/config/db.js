@@ -28,7 +28,6 @@ const rawPool = mysql.createPool({
   
   // Timeouts & Keep-Alives to prevent Railway 502/restarts and cold delays
   connectTimeout: 10000,        // 10 seconds to connect
-  acquireTimeout: 10000,        // 10 seconds to acquire a connection
   enableKeepAlive: true,        // Prevent connection drop-offs by active TCP ping
   keepAliveInitialDelay: 30000  // Ping every 30 seconds (reduces idle Railway CPU wakeups)
 });

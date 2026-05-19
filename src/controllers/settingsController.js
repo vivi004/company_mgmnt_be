@@ -12,16 +12,29 @@ const ensureSettings = async () => {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
     `);
-    // Safely add columns if they don't exist
-    try {
-        await db.query('ALTER TABLE app_settings ADD COLUMN ledger_sheet_url TEXT');
-    } catch (e) {}
-    try {
-        await db.query("ALTER TABLE app_settings ADD COLUMN revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00'");
-    } catch (e) {}
-    try {
-        await db.query("ALTER TABLE app_settings ADD COLUMN last_sheet_sync_time VARCHAR(100)");
-    } catch (e) {}
+    // Safely add columns if they don't exist, checking schema first to prevent SQL errors
+    const [existingSettingsCols] = await db.query(`
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_settings'
+    `);
+    const settingsColNames = existingSettingsCols.map(c => c.COLUMN_NAME.toLowerCase());
+
+    if (!settingsColNames.includes('ledger_sheet_url')) {
+        try {
+            await db.query('ALTER TABLE app_settings ADD COLUMN ledger_sheet_url TEXT');
+        } catch (e) {}
+    }
+    if (!settingsColNames.includes('revoked_at')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN revoked_at TIMESTAMP DEFAULT '2000-01-01 00:00:00'");
+        } catch (e) {}
+    }
+    if (!settingsColNames.includes('last_sheet_sync_time')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN last_sheet_sync_time VARCHAR(100)");
+        } catch (e) {}
+    }
     // Insert default row if not present
     await db.query(`
         INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)

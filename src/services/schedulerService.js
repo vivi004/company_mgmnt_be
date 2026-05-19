@@ -74,102 +74,107 @@ async function applyDueBills() {
 
     console.log(`[CRON] Applying due bills for delivery date: ${todayIST}`);
 
+    const connection = await db.getConnection();
     try {
-        // Find all bills due today that haven't been applied yet
-        const [dueBills] = await db.query(`
+        await connection.beginTransaction();
+
+        // Find all bills due today that haven't been applied yet, with FOR UPDATE lock on the rows
+        const [dueBills] = await connection.query(`
             SELECT b.id, b.shop_id, b.shop_name, b.village_name, b.total_amount, b.created_by,
-                   s.order_line_id, COALESCE(sb.balance, 0) as current_balance
+                   s.order_line_id, s.owner_name as specific_area, COALESCE(sb.balance, 0) as current_balance
             FROM bills b
             JOIN shops s ON b.shop_id = s.id
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE DATE(CONVERT_TZ(b.delivery_date, '+00:00', '+05:30')) = ?
               AND b.is_applied_to_balance = 0
+            FOR UPDATE
         `, [todayIST]);
 
         if (dueBills.length === 0) {
             console.log('[CRON] No pending delivery-date bills to apply.');
+            await connection.commit();
             return;
         }
 
-        const connection = await db.getConnection();
-        try {
-            await connection.beginTransaction();
+        // Compute IST timestamp once for all entries in this batch
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
 
-            // Compute IST timestamp once for all entries in this batch
-            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
-            const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
+        for (const bill of dueBills) {
+            const amount = parseFloat(bill.total_amount) || 0;
+            
+            // Query fresh current balance of the shop to avoid race condition/overwriting with concurrent bills
+            const [shopBalanceRows] = await connection.query(
+                'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ? FOR UPDATE',
+                [bill.shop_id]
+            );
+            const currentBalance = shopBalanceRows.length > 0 ? parseFloat(shopBalanceRows[0].balance) : 0;
+            const newBalance = currentBalance + amount;
 
-            for (const bill of dueBills) {
-                const amount = parseFloat(bill.total_amount) || 0;
-                const newBalance = parseFloat(bill.current_balance) + amount;
+            // 1. Apply to shop_balances
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [bill.shop_id, newBalance]
+            );
 
-                // 1. Apply to shop_balances
-                await connection.query(
-                    'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-                    [bill.shop_id, newBalance]
-                );
+            // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
+            await connection.query(
+                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, newBalance, bill.created_by || 'System', istTimestamp]
+            );
 
-                // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
-                await connection.query(
-                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, newBalance, bill.created_by || 'System', istTimestamp]
-                );
+            // 3. Update daily_collections for today — add to todays_bill_amount + total_balance
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON DUPLICATE KEY UPDATE
+                    todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [bill.shop_id, bill.shop_name, bill.village_name, bill.order_line_id,
+                todayIST, amount, currentBalance, newBalance]);
 
-                // 3. Update daily_collections for today — add to todays_bill_amount + total_balance
-                await connection.query(`
-                    INSERT INTO daily_collections
-                        (shop_id, shop_name, village_name, order_line_id, collection_date,
-                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                    ON DUPLICATE KEY UPDATE
-                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-                `, [bill.shop_id, bill.shop_name, bill.village_name, bill.order_line_id,
-                    todayIST, amount, parseFloat(bill.current_balance), newBalance]);
+            // 4. Also remove from yesterday's future_bills (if it was tracked there)
+            const yesterdayIST = getISTDateString(-1);
+            await connection.query(`
+                UPDATE daily_collections
+                SET future_bills = GREATEST(0, future_bills - ?)
+                WHERE shop_id = ? AND collection_date = ?
+            `, [amount, bill.shop_id, yesterdayIST]);
 
-                // 4. Also remove from yesterday's future_bills (if it was tracked there)
-                const yesterdayIST = getISTDateString(-1);
-                await connection.query(`
-                    UPDATE daily_collections
-                    SET future_bills = GREATEST(0, future_bills - ?)
-                    WHERE shop_id = ? AND collection_date = ?
-                `, [amount, bill.shop_id, yesterdayIST]);
+            // 5. Mark bill as applied
+            await connection.query(
+                'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
+                [bill.id]
+            );
 
-                // 5. Mark bill as applied
-                await connection.query(
-                    'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
-                    [bill.id]
-                );
+            // 6. Push to Ledger (Google Sheets)
+            webhookService.sendTransactionToWebhook({
+                shop_id: bill.shop_id,
+                shop_name: bill.shop_name,
+                village_name: bill.village_name,
+                specific_area: bill.specific_area || '',
+                type: 'Bill',
+                amount: amount,
+                description: `Delivery Due — Invoice Applied`,
+                balance_before: currentBalance,
+                balance_after: newBalance,
+                created_by: bill.created_by || 'System',
+                reference_id: bill.id
+            });
 
-                // 6. Push to Ledger (Google Sheets)
-                webhookService.sendTransactionToWebhook({
-                    shop_id: bill.shop_id,
-                    shop_name: bill.shop_name,
-                    village_name: bill.village_name,
-                    specific_area: bill.specific_area || '',
-                    type: 'Bill',
-                    amount: amount,
-                    description: `Delivery Due — Invoice Applied`,
-                    balance_before: bill.current_balance,
-                    balance_after: newBalance,
-                    created_by: bill.created_by || 'System',
-                    reference_id: bill.id
-                });
-
-                // 6. MASTER SYNC: Ripple forward from today
-                await financialService.rebuildRipple(connection, bill.shop_id, todayIST);
-            }
-
-            await connection.commit();
-            console.log(`[CRON] Applied ${dueBills.length} delivery-date bills to shop balances.`);
-        } catch (err) {
-            await connection.rollback();
-            console.error('[CRON] applyDueBills transaction error:', err.message);
-        } finally {
-            connection.release();
+            // 7. MASTER SYNC: Ripple forward from today
+            await financialService.rebuildRipple(connection, bill.shop_id, todayIST);
         }
+
+        await connection.commit();
+        console.log(`[CRON] Applied ${dueBills.length} delivery-date bills to shop balances.`);
     } catch (err) {
-        console.error('[CRON] applyDueBills error:', err.message);
+        await connection.rollback();
+        console.error('[CRON] applyDueBills transaction error:', err.message);
+    } finally {
+        connection.release();
     }
 }
 

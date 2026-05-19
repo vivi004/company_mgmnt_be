@@ -1,15 +1,16 @@
 const db = require('../config/db');
 
 /**
- * THE UNIFIED SOURCE-OF-TRUTH RIPPLE
+ * THE UNIFIED SOURCE-OF-TRUTH RIPPLE (HIGH-PERFORMANCE EDITIONS)
+ * Recalculates shop balances and daily collections sequentially in memory,
+ * then commits all updates to the database in batch using CASE statements.
  */
 async function rebuildRipple(connection, shopId, targetDate) {
-    console.log(`[RIPPLE] Starting master ripple for Shop #${shopId} from ${targetDate}`);
+    console.log(`[RIPPLE] Starting optimized master ripple for Shop #${shopId} from ${targetDate}`);
 
     // Helper to get YYYY-MM-DD in IST
     const toISTDate = (date) => {
         const d = typeof date === 'string' ? new Date(date) : date;
-        // Format to YYYY-MM-DD in Asia/Kolkata timezone
         return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     };
 
@@ -36,14 +37,16 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
     // 2. Fetch all transactions from targetDate onwards
     const [transactions] = await connection.query(
-        `SELECT * FROM shop_transactions 
+        `SELECT id, amount, type, payment_mode, transaction_date 
+         FROM shop_transactions 
          WHERE shop_id = ? AND transaction_date >= ? 
          ORDER BY transaction_date ASC, id ASC`,
-        [shopId, targetDate]
+         [shopId, targetDate]
     );
 
     const dailyAggregates = {}; 
 
+    // 3. Process transactions in-memory
     for (const tx of transactions) {
         const amount = parseFloat(tx.amount);
         const type = tx.type;
@@ -58,10 +61,8 @@ async function rebuildRipple(connection, shopId, targetDate) {
             runningBalance += amount; 
         }
 
-        await connection.query(
-            'UPDATE shop_transactions SET balance_after = ? WHERE id = ?',
-            [runningBalance, tx.id]
-        );
+        // Store new balance in-memory to update later in batch
+        tx.new_balance_after = runningBalance;
 
         if (!dailyAggregates[dateStr]) {
             dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0 };
@@ -84,7 +85,22 @@ async function rebuildRipple(connection, shopId, targetDate) {
         }
     }
 
-    // 3. Fetch all future bills for this shop to correctly populate future_bills column
+    // HIGH-PERFORMANCE BATCH UPDATE 1: shop_transactions
+    if (transactions.length > 0) {
+        let txSql = 'UPDATE shop_transactions SET balance_after = CASE id ';
+        const txParams = [];
+        for (const tx of transactions) {
+            txSql += 'WHEN ? THEN ? ';
+            txParams.push(tx.id, tx.new_balance_after);
+        }
+        txSql += 'END WHERE id IN (' + transactions.map(() => '?').join(',') + ')';
+        const txIds = transactions.map(tx => tx.id);
+        
+        await connection.query(txSql, [...txParams, ...txIds]);
+        console.log(`[RIPPLE] Batch updated ${transactions.length} shop transactions in 1 query.`);
+    }
+
+    // 4. Fetch all future bills for this shop
     const [futureBillRows] = await connection.query(
         `SELECT total_amount, CONVERT_TZ(delivery_date, '+00:00', '+05:30') as del_date 
          FROM bills 
@@ -92,9 +108,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
         [shopId]
     );
     
-    // We'll calculate future_bills dynamically for each day in the loop below
-
-    // 4. Update daily_collections sequentially
+    // 5. Fetch all future collection dates
     const [dates] = await connection.query(
         `SELECT DISTINCT collection_date FROM daily_collections 
          WHERE shop_id = ? AND collection_date >= ? 
@@ -111,6 +125,9 @@ async function rebuildRipple(connection, shopId, targetDate) {
     
     let lastDayTotal = prevDay.length > 0 ? parseFloat(prevDay[0].total_balance) : (prevTx.length > 0 ? parseFloat(prevTx[0].balance_after) : initialBalance);
 
+    const dcUpdates = [];
+
+    // Calculate all daily_collections updates in-memory
     for (const d of dates) {
         const dStr = toISTDate(d.collection_date);
         const agg = dailyAggregates[dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0 };
@@ -118,29 +135,53 @@ async function rebuildRipple(connection, shopId, targetDate) {
         const newOldBal = lastDayTotal;
         const newTotalBal = newOldBal + agg.bill - (agg.cash + agg.upi + agg.cheque) + agg.adj;
 
-        // Calculate future_bills for this specific day
-        // It's the sum of all bills where delivery_date > this day AND NOT YET APPLIED
         const dayFutureBills = futureBillRows
             .filter(b => b.del_date.toISOString().split('T')[0] > dStr)
             .reduce((sum, b) => sum + parseFloat(b.total_amount), 0);
 
-        await connection.query(
-            `UPDATE daily_collections 
-             SET old_balance = ?, 
-                 todays_bill_amount = ?,
-                 cash_collected = ?,
-                 upi_collected = ?,
-                 cheque_collected = ?,
-                 manual_adjustments = ?,
-                 total_balance = ?,
-                 future_bills = ?
-             WHERE shop_id = ? AND collection_date = ?`,
-            [newOldBal, agg.bill, agg.cash, agg.upi, agg.cheque, agg.adj, newTotalBal, dayFutureBills, shopId, d.collection_date]
-        );
+        dcUpdates.push({
+            collection_date: d.collection_date,
+            old_balance: newOldBal,
+            todays_bill_amount: agg.bill,
+            cash_collected: agg.cash,
+            upi_collected: agg.upi,
+            cheque_collected: agg.cheque,
+            manual_adjustments: agg.adj,
+            total_balance: newTotalBal,
+            future_bills: dayFutureBills
+        });
 
         lastDayTotal = newTotalBal;
     }
 
+    // HIGH-PERFORMANCE BATCH UPDATE 2: daily_collections
+    if (dcUpdates.length > 0) {
+        let dcSql = 'UPDATE daily_collections SET ';
+        const fields = ['old_balance', 'todays_bill_amount', 'cash_collected', 'upi_collected', 'cheque_collected', 'manual_adjustments', 'total_balance', 'future_bills'];
+        const sqlParts = [];
+        const dcParams = [];
+
+        fields.forEach(field => {
+            let part = `${field} = CASE collection_date `;
+            dcUpdates.forEach(row => {
+                part += 'WHEN ? THEN ? ';
+                dcParams.push(row.collection_date, row[field]);
+            });
+            part += 'END';
+            sqlParts.push(part);
+        });
+
+        dcSql += sqlParts.join(', ');
+        dcSql += ' WHERE shop_id = ? AND collection_date IN (' + dcUpdates.map(() => '?').join(',') + ')';
+        
+        dcParams.push(shopId);
+        dcUpdates.forEach(row => dcParams.push(row.collection_date));
+
+        await connection.query(dcSql, dcParams);
+        console.log(`[RIPPLE] Batch updated ${dcUpdates.length} daily collection dates in 1 query.`);
+    }
+
+    // 6. Update general shop balance in shop_balances
     await connection.query(
         'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
         [shopId, runningBalance]

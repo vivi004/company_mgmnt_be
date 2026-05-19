@@ -6,13 +6,16 @@
     "scripts": {
         "start": "node src/server.js",
         "dev": "nodemon src/server.js",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "audit": "npm audit",
+        "outdated": "npm outdated"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
     "type": "commonjs",
     "dependencies": {
+        "@sentry/node": "^7.114.0",
         "axios": "^1.15.2",
         "bcryptjs": "^3.0.3",
         "compression": "^1.8.1",

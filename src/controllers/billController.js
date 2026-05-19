@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const webhookService = require('../services/webhookService');
 const financialService = require('../services/financialService');
+const cacheService = require('../services/cacheService');
 
 exports.createBill = async (req, res) => {
     const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
@@ -243,6 +244,7 @@ exports.createBill = async (req, res) => {
         }
 
         await connection.commit();
+        cacheService.flush();
 
         // Webhook moved inside !isFutureBill block above
 
@@ -266,16 +268,24 @@ exports.createBill = async (req, res) => {
 };
 
 exports.getAllBills = async (req, res) => {
+    const limit = parseInt(req.query.limit) || 1000;
+    const page = parseInt(req.query.page) || 1;
+    const offset = (page - 1) * limit;
+
     try {
         // Primary ledger = only verified bills
         const [rows] = await db.query(`
-            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+            SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.is_applied_to_balance, b.created_at, 
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Verified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
-        `);
+            LIMIT ? OFFSET ?
+        `, [limit, offset]);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -291,15 +301,23 @@ exports.getAllBills = async (req, res) => {
 };
 
 exports.getUnverifiedBills = async (req, res) => {
+    const limit = parseInt(req.query.limit) || 1000;
+    const page = parseInt(req.query.page) || 1;
+    const offset = (page - 1) * limit;
+
     try {
         const [rows] = await db.query(`
-            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+            SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.is_applied_to_balance, b.created_at, 
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Unverified" 
             ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
-        `);
+            LIMIT ? OFFSET ?
+        `, [limit, offset]);
         const mapped = rows.map(row => {
             let cart = row.cart;
             let custom_rates = row.custom_rates;
@@ -434,6 +452,7 @@ exports.deleteBill = async (req, res) => {
         await connection.query('DELETE FROM bills WHERE id = ?', [id]);
 
         await connection.commit();
+        cacheService.flush();
         res.json({ message: 'Bill deleted and balance reversed successfully' });
     } catch (err) {
         if (connection) await connection.rollback();
@@ -686,6 +705,7 @@ exports.updateBill = async (req, res) => {
         }
 
         await connection.commit();
+        cacheService.flush();
         res.json({ message: 'Bill updated and balance adjusted successfully' });
     } catch (err) {
         if (connection) await connection.rollback();
@@ -698,9 +718,16 @@ exports.updateBill = async (req, res) => {
 
 exports.getBillsByDateRange = async (req, res) => {
     const { startDate, endDate } = req.query;
+    const limit = parseInt(req.query.limit) || 1000;
+    const page = parseInt(req.query.page) || 1;
+    const offset = (page - 1) * limit;
+
     try {
         let query = `
-            SELECT b.*, s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+            SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.is_applied_to_balance, b.created_at,
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id 
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
@@ -720,7 +747,8 @@ exports.getBillsByDateRange = async (req, res) => {
             params.push(end.toISOString().split('T')[0]);
         }
 
-        query += ' GROUP BY b.id ORDER BY b.bill_date DESC';
+        query += ' GROUP BY b.id ORDER BY b.bill_date DESC LIMIT ? OFFSET ?';
+        params.push(limit, offset);
 
         const [rows] = await db.query(query, params);
         const mapped = rows.map(row => {

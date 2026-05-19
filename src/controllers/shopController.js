@@ -2,6 +2,7 @@ const db = require('../config/db');
 const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 const financialService = require('../services/financialService');
+const cacheService = require('../services/cacheService');
 
 // Legacy local rebuildRipple removed in favor of financialService.rebuildRipple
 
@@ -35,6 +36,9 @@ const getShopsByOrderLine = async (req, res) => {
 
 // GET all shops
 const getAllShops = async (req, res) => {
+    const limit = parseInt(req.query.limit) || 1000;
+    const page = parseInt(req.query.page) || 1;
+    const offset = (page - 1) * limit;
     try {
         const [shops] = await db.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
@@ -43,7 +47,9 @@ const getAllShops = async (req, res) => {
              FROM shops s
              LEFT JOIN shop_balances sb ON s.id = sb.shop_id
              JOIN order_lines ol ON s.order_line_id = ol.id
-             ORDER BY ol.name ASC, s.shop_name ASC`
+             ORDER BY ol.name ASC, s.shop_name ASC
+             LIMIT ? OFFSET ?`,
+             [limit, offset]
         );
         res.json(shops);
     } catch (err) {
@@ -86,6 +92,7 @@ const createShop = async (req, res) => {
         );
 
         await connection.commit();
+        cacheService.flush();
 
         // Push "Opening Balance" to Webhook
         webhookService.sendTransactionToWebhook({
@@ -212,6 +219,7 @@ const updateShop = async (req, res) => {
         }
 
         await connection.commit();
+        cacheService.flush();
         res.json({ message: 'Shop and related records updated successfully' });
     } catch (err) {
         if (connection) await connection.rollback();
@@ -277,6 +285,7 @@ const deleteShop = async (req, res) => {
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);
 
         await connection.commit();
+        cacheService.flush();
         res.json({ message: 'Shop and all associated records deleted successfully' });
     } catch (err) {
         if (connection) await connection.rollback();
@@ -481,6 +490,7 @@ const collectPayment = async (req, res) => {
         }
 
         await connection.commit();
+        cacheService.flush();
 
         // Push to Webhook
         webhookService.sendTransactionToWebhook({
@@ -516,7 +526,9 @@ const getShopLedger = async (req, res) => {
     const skip = parseInt(req.query.skip) || 0;
     try {
         const [transactions] = await db.query(
-            'SELECT * FROM shop_transactions WHERE shop_id = ? ORDER BY id DESC LIMIT ? OFFSET ?',
+            `SELECT id, shop_id, type, amount, payment_mode, transaction_category, description, 
+                    balance_after, approval_status, affects_balance, created_by, transaction_date, approved_by, approved_at, rejected_reason, created_at 
+             FROM shop_transactions WHERE shop_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
             [id, limit, skip]
         );
         res.json(transactions);
@@ -635,6 +647,7 @@ const adjustBalance = async (req, res) => {
         }
 
         await connection.commit();
+        cacheService.flush();
 
         // Push to Webhook (ONLY if approved)
         if (affectsBalance) {
@@ -683,7 +696,12 @@ const approveTransaction = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Get Transaction
-        const [txs] = await connection.query('SELECT * FROM shop_transactions WHERE id = ? FOR UPDATE', [tx_id]);
+        const [txs] = await connection.query(
+            `SELECT id, shop_id, type, amount, payment_mode, transaction_category, description, 
+                    balance_after, approval_status, affects_balance, created_by, transaction_date 
+             FROM shop_transactions WHERE id = ? FOR UPDATE`,
+            [tx_id]
+        );
         if (txs.length === 0) return res.status(404).json({ error: 'Transaction not found' });
         const tx = txs[0];
 
@@ -691,7 +709,8 @@ const approveTransaction = async (req, res) => {
 
         // 2. Get Shop
         const [shops] = await connection.query(`
-            SELECT s.*, COALESCE(sb.balance, 0) as balance 
+            SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, s.created_at,
+                   COALESCE(sb.balance, 0) as balance 
             FROM shops s 
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id 
             WHERE s.id = ? FOR UPDATE
@@ -762,6 +781,7 @@ const approveTransaction = async (req, res) => {
         await financialService.rebuildRipple(connection, tx.shop_id, txDate);
 
         await connection.commit();
+        cacheService.flush();
 
         // Push to Webhook
         webhookService.sendTransactionToWebhook({
@@ -795,6 +815,7 @@ const rejectTransaction = async (req, res) => {
             "UPDATE shop_transactions SET approval_status = 'REJECTED', rejected_reason = ? WHERE id = ? AND approval_status = 'PENDING'",
             [reason || 'Rejected by Admin', tx_id]
         );
+        cacheService.flush();
         res.json({ message: 'Transaction rejected' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to reject transaction' });
@@ -816,6 +837,7 @@ const repairShopRipple = async (req, res) => {
         await connection.beginTransaction();
         await financialService.rebuildRipple(connection, id, fromDate);
         await connection.commit();
+        cacheService.flush();
         res.json({ message: `Ripple rebuilt for shop ${id} from ${fromDate}` });
     } catch (err) {
         await connection.rollback();
@@ -848,6 +870,7 @@ const repairAllShopsRipple = async (req, res) => {
                 console.error(`Failed to repair shop ${shop.id}:`, err.message);
             }
         }
+        cacheService.flush();
         res.json({ message: `Repair complete for ${shops.length} shops` });
     } catch (err) {
         res.status(500).json({ error: err.message });

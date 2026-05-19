@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const cacheService = require('../services/cacheService');
 
 /**
  * GET /api/collections?date=YYYY-MM-DD
@@ -10,14 +11,28 @@ exports.getCollectionsByDate = async (req, res) => {
     if (!date) {
         return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
     }
+
+    const cacheKey = `collections:all:${date}`;
+    const cachedData = cacheService.get(cacheKey);
+    if (cachedData) {
+        // console.log(`[CACHE HIT] Serving all collections for date: ${date}`);
+        return res.json(cachedData);
+    }
+
     try {
         const [rows] = await db.query(`
-            SELECT dc.*, ol.name AS order_line_name, ol.node_id
+            SELECT dc.id, dc.shop_id, dc.shop_name, dc.village_name, dc.order_line_id, dc.collection_date,
+                   dc.todays_bill_amount, dc.cash_collected, dc.upi_collected, dc.cheque_collected,
+                   dc.old_balance, dc.total_balance, dc.future_bills, dc.manual_adjustments, dc.last_updated,
+                   ol.name AS order_line_name, ol.node_id
             FROM daily_collections dc
             JOIN order_lines ol ON dc.order_line_id = ol.id
             WHERE dc.collection_date = ?
             ORDER BY ol.name ASC, dc.shop_name ASC
         `, [date]);
+        
+        // Cache result for 10 seconds (short-term buffer for heavy bursts)
+        cacheService.set(cacheKey, rows, 10);
         res.json(rows);
     } catch (err) {
         console.error('getCollectionsByDate error:', err);
@@ -56,6 +71,13 @@ exports.getCollectionsByOrderLine = async (req, res) => {
         } catch (e) {
             console.error('Staff access check error:', e);
         }
+    }
+
+    const cacheKey = `collections:${olId}:${date}`;
+    const cachedData = cacheService.get(cacheKey);
+    if (cachedData) {
+        // console.log(`[CACHE HIT] Serving collections for Order Line #${olId} on ${date}`);
+        return res.json(cachedData);
     }
 
     try {
@@ -119,7 +141,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                     SUM(CASE WHEN amount < 0 AND type = 'Adjustment' AND payment_mode = 'CHEQUE' THEN ABS(amount) ELSE 0 END) as m_cheque,
                     SUM(CASE WHEN amount > 0 AND type = 'Adjustment' THEN amount ELSE 0 END) as m_pos
                 FROM shop_transactions
-                WHERE approval_status = 'APPROVED' AND DATE(transaction_date) = ?
+                WHERE approval_status = 'APPROVED' AND transaction_date >= ? AND transaction_date < DATE_ADD(?, INTERVAL 1 DAY)
                 GROUP BY shop_id
             ) adj ON s.id = adj.shop_id
             LEFT JOIN (
@@ -136,23 +158,27 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                         )
                     ) as pending_json
                 FROM shop_transactions
-                WHERE approval_status = 'PENDING' AND DATE(transaction_date) = ?
+                WHERE approval_status = 'PENDING' AND transaction_date >= ? AND transaction_date < DATE_ADD(?, INTERVAL 1 DAY)
                 GROUP BY shop_id
             ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, date, olId]);
+        `, [date, date, date, date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`
-            SELECT * FROM daily_expenses
+            SELECT id, order_line_id, amount, description, expense_date, created_at FROM daily_expenses
             WHERE order_line_id = ? AND expense_date = ?
         `, [olId, date]);
 
-        res.json({
+        const responsePayload = {
             collections: rows,
             expenses: expRows
-        });
+        };
+
+        // Cache the formatted collections and expenses payload for 10 seconds
+        cacheService.set(cacheKey, responsePayload, 10);
+        res.json(responsePayload);
     } catch (err) {
         console.error('getCollectionsByOrderLine error:', err);
         res.status(500).json({ error: 'Failed to fetch collections for order line' });
@@ -175,6 +201,9 @@ exports.addExpense = async (req, res) => {
             INSERT INTO daily_expenses (order_line_id, amount, description, expense_date)
             VALUES (?, ?, ?, ?)
         `, [order_line_id, amount, description || '', date]);
+
+        // Clear dashboard caching on write
+        cacheService.flush();
 
         res.json({ message: 'Expense added successfully' });
     } catch (err) {
@@ -202,6 +231,9 @@ exports.updateExpense = async (req, res) => {
             WHERE id = ?
         `, [amount, description || '', id]);
 
+        // Clear dashboard caching on write
+        cacheService.flush();
+
         res.json({ message: 'Expense updated successfully' });
     } catch (err) {
         console.error('updateExpense error:', err);
@@ -218,6 +250,10 @@ exports.deleteExpense = async (req, res) => {
 
     try {
         await db.query('DELETE FROM daily_expenses WHERE id = ?', [id]);
+
+        // Clear dashboard caching on write
+        cacheService.flush();
+
         res.json({ message: 'Expense deleted successfully' });
     } catch (err) {
         console.error('deleteExpense error:', err);

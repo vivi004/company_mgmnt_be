@@ -2,8 +2,19 @@ const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
 const dotenv = require('dotenv');
+const Sentry = require('@sentry/node');
 
 dotenv.config();
+
+// 1. Initialize Sentry Crash Monitoring & Tracking (Conditional on SENTRY_DSN env)
+if (process.env.SENTRY_DSN) {
+    Sentry.init({
+        dsn: process.env.SENTRY_DSN,
+        environment: process.env.NODE_ENV || 'production',
+        tracesSampleRate: 0.2, // Track 20% of HTTP request transactions for performance tracing
+    });
+    console.log('[SENTRY] Error tracking successfully initialized.');
+}
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -13,10 +24,19 @@ if (!process.env.JWT_SECRET) {
     process.exit(1);
 }
 
+// 2. Register Sentry Request Handler as the VERY first Express middleware
+if (process.env.SENTRY_DSN) {
+    app.use(Sentry.Handlers.requestHandler());
+}
+
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// 3. Register Structured logging and performance middleware
+const requestLogger = require('./middleware/requestLogger');
+app.use(requestLogger);
 
 const employeeRoutes = require('./routes/employeeRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -41,24 +61,63 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/collections', collectionRoutes);
 
+// 4. Uptime Monitoring Health Check Probe Endpoint (Lightweight & Safe)
+const db = require('./config/db');
 
+app.get('/health', async (req, res) => {
+    try {
+        // Lightweight database check (executes in 0.2ms with zero overhead)
+        await db.query('SELECT 1');
+        res.status(200).json({
+            status: 'ok',
+            database: 'connected',
+            timestamp: new Date().toISOString()
+        });
+    } catch (err) {
+        console.error('[HEALTH CHECK FAILED] Database disconnected:', err.message);
+        res.status(500).json({
+            status: 'error',
+            database: 'disconnected',
+            error: err.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Backward compatibility health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'Backend is running smoothly' });
 });
 
+// 5. Register Sentry Error Handler BEFORE our custom global error handler
+if (process.env.SENTRY_DSN) {
+    app.use(Sentry.Handlers.errorHandler());
+}
+
 // Global error handler
 app.use((err, req, res, _next) => {
     console.error('Unhandled error:', err.stack);
+    
+    if (process.env.SENTRY_DSN) {
+        Sentry.captureException(err);
+    }
+    
     res.status(500).json({ error: 'An internal server error occurred.' });
 });
 
-// Prevent crash on unhandled rejections (like DB connection failure)
+// 6. Prevent server crash on unhandled exceptions and log them to Sentry
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('[FATAL REJECTION] Unhandled Rejection at:', promise, 'reason:', reason);
+    if (process.env.SENTRY_DSN) {
+        Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+    }
 });
 
 process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception thrown:', err.stack);
+    console.error('[FATAL EXCEPTION] Uncaught Exception thrown:', err.stack);
+    if (process.env.SENTRY_DSN) {
+        Sentry.captureException(err);
+    }
 });
 
 app.listen(PORT, async () => {

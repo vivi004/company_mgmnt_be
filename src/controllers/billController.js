@@ -3,6 +3,152 @@ const webhookService = require('../services/webhookService');
 const financialService = require('../services/financialService');
 const cacheService = require('../services/cacheService');
 
+const DEFAULT_PRODUCTS = {
+    // Nisha Oils
+    'gn-500ml': { price: 110, size: '500 ml', brand: 'Nisha' },
+    'gn-1l-pet': { price: 220, size: '1 ltr', brand: 'Nisha' },
+    'gn-2l': { price: 440, size: '2 ltr', brand: 'Nisha' },
+    'gn-5l-can': { price: 1100, size: '5 Ltr Can', brand: 'Nisha' },
+    'gn-5l-can-r': { price: 1100, size: '5 Ltr Can', brand: 'Nisha' },
+    'gn-5kg-can': { price: 1245, size: '5 Kg Can', brand: 'Nisha' },
+    'gn-15l': { price: 3260, size: '15 LTR', brand: 'Nisha' },
+    'gn-15kg': { price: 3530, size: '15 KG', brand: 'Nisha' },
+
+    'cn-100ml': { price: 38, size: '100 ml', brand: 'Nisha' },
+    'cn-200ml': { price: 74, size: '200 ml', brand: 'Nisha' },
+    'cn-500ml': { price: 175, size: '500 ml', brand: 'Nisha' },
+    'cn-1l-pet': { price: 350, size: '1 ltr', brand: 'Nisha' },
+    'cn-5l-can': { price: 1750, size: '5 Ltr Can', brand: 'Nisha' },
+    'cn-15l': { price: 5175, size: '15 LTR', brand: 'Nisha' },
+    'cn-15kg': { price: 5642.5, size: '15 KG', brand: 'Nisha' },
+
+    'cs-100ml': { price: 29, size: '100 ml', brand: 'Nisha' },
+    'cs-200ml': { price: 56, size: '200 ml', brand: 'Nisha' },
+    'cs-500ml': { price: 130, size: '500 ml', brand: 'Nisha' },
+    'cs-1l-pet': { price: 260, size: '1 ltr', brand: 'Nisha' },
+    'cs-5l-can': { price: 1300, size: '5 Ltr Can', brand: 'Nisha' },
+    'cs-15l': { price: 3825, size: '15 LTR', brand: 'Nisha' },
+    'cs-15kg': { price: 4157.5, size: '15 KG', brand: 'Nisha' },
+
+    'lo-100ml': { price: 18, size: '100 ml', brand: 'Nisha' },
+    'lo-200ml': { price: 34, size: '200 ml', brand: 'Nisha' },
+    'lo-500ml': { price: 75, size: '500 ml', brand: 'Nisha' },
+    'lo-1l-pet': { price: 150, size: '1 ltr', brand: 'Nisha' },
+    'lo-5l-can': { price: 750, size: '5 Ltr Can', brand: 'Nisha' },
+    'lo-15l': { price: 2100, size: '15 LTR', brand: 'Nisha' },
+    'lo-15kg': { price: 2250, size: '15 KG', brand: 'Nisha' },
+
+    'gg-100ml': { price: 38, size: '100 ml', brand: 'Nisha' },
+    'gg-200ml': { price: 74, size: '200 ml', brand: 'Nisha' },
+    'gg-500ml': { price: 175, size: '500 ml', brand: 'Nisha' },
+    'gg-1l-pet': { price: 350, size: '1 ltr', brand: 'Nisha' },
+    'gg-5l-can': { price: 1750, size: '5 Ltr Can', brand: 'Nisha' },
+    'gg-15l': { price: 5175, size: '15 LTR', brand: 'Nisha' },
+    'gg-15kg': { price: 5642.5, size: '15 KG', brand: 'Nisha' },
+
+    'mo-100ml': { price: 29, size: '100 ml', brand: 'Nisha' },
+    'mo-200ml': { price: 56, size: '200 ml', brand: 'Nisha' },
+    'mo-500ml': { price: 130, size: '500 ml', brand: 'Nisha' },
+    'mo-1l-pet': { price: 260, size: '1 ltr', brand: 'Nisha' },
+    'mo-5l-can': { price: 1300, size: '5 Ltr Can', brand: 'Nisha' },
+    'mo-15l': { price: 3825, size: '15 LTR', brand: 'Nisha' },
+    'mo-15kg': { price: 4157.5, size: '15 KG', brand: 'Nisha' },
+
+    'nm-100ml': { price: 39, size: '100 ml', brand: 'Nisha' },
+    'nm-200ml': { price: 76, size: '200 ml', brand: 'Nisha' },
+    'nm-500ml': { price: 180, size: '500 ml', brand: 'Nisha' },
+    'nm-1l-pet': { price: 360, size: '1 ltr', brand: 'Nisha' },
+    'nm-5l-can': { price: 1800, size: '5 Ltr Can', brand: 'Nisha' },
+    'nm-15l': { price: 5325, size: '15 LTR', brand: 'Nisha' },
+    'nm-15kg': { price: 5807.5, size: '15 KG', brand: 'Nisha' },
+
+    'vs-gn-500ml-box': { price: 2200, size: '500 ml box', brand: 'VARSHINI' },
+    'vs-gn-1l-box': { price: 2200, size: '1 LTR box', brand: 'VARSHINI' },
+
+    // Mixed Oils / Varshini Gold
+    'mo-v-0.5po': { price: 1500, size: '1/2 Pkt', brand: 'VARSHINI' },
+    'mo-v-1lpo': { price: 1500, size: '1 Ltr Pkt', brand: 'VARSHINI' },
+    'mo-v-5lcan': { price: 775, size: '5 Ltr Can', brand: 'VARSHINI' },
+    'mo-v-5lcan-y': { price: 800, size: '5 Ltr Can', brand: 'VARSHINI' },
+    'mo-v-5lcan-ny': { price: 820, size: '5 Ltr Can', brand: 'VARSHINI' },
+    'mo-v-15l': { price: 2230, size: '15 LTR', brand: 'VARSHINI' },
+    'mo-v-15kg': { price: 2440, size: '15 KG', brand: 'VARSHINI' },
+    'mo-r-0.5lpo': { price: 1380, size: '1/2 Ltr ', brand: 'ROSHINI' },
+    'mo-r-1lpo': { price: 1380, size: '1 Ltr ', brand: 'ROSHINI' },
+
+    // Palm Oil
+    'po-r-850g': { price: 1320, size: '850 GM', brand: 'ROSI GOLD' },
+    'po-r-820g': { price: 1280, size: '820 GM', brand: 'ROSI GOLD' },
+    'po-r-800g': { price: 1250, size: '800 GM', brand: 'ROSI GOLD' },
+    'po-r-750g': { price: 1185, size: '750 GM', brand: 'ROSI GOLD' },
+    'po-r-15l': { price: 2180, size: '15 LTR', brand: 'ROSI GOLD' },
+    'po-r-15kg': { price: 2400, size: '15 KG', brand: 'ROSI GOLD' },
+
+    // Burfi
+    'bu-k-barfi': { price: 110, size: 'JAR', brand: 'Nisha' },
+
+    // Oil Cake
+    'oc-thool-25kg': { price: 1525, size: '25 KG', brand: 'Nisha' },
+    'oc-thool-50kg': { price: 3000, size: '50 KG', brand: 'Nisha' },
+    'oc-katti-25kg': { price: 1500, size: '25 KG', brand: 'Nisha' },
+    'oc-katti-50kg': { price: 2950, size: '50 KG', brand: 'Nisha' }
+};
+
+function recalculateTotalAmount(cart, customRates, dbRates) {
+    let total = 0;
+    
+    // Normalize inputs
+    const parsedCart = typeof cart === 'string' ? JSON.parse(cart) : (cart || {});
+    const parsedCustom = typeof customRates === 'string' ? JSON.parse(customRates) : (customRates || {});
+    const ratesLookup = dbRates || {};
+
+    for (const [key, quantity] of Object.entries(parsedCart)) {
+        if (!quantity || quantity <= 0) continue;
+
+        let baseId = key;
+        let isBox = false;
+        let isLtr = false;
+
+        if (key.endsWith('_box')) {
+            baseId = key.slice(0, -4);
+            isBox = true;
+        } else if (key.endsWith('_ltr')) {
+            baseId = key.slice(0, -4);
+            isLtr = true;
+        }
+
+        // Get base price: customRates overrides database rates, which overrides hardcoded defaults
+        const defaultProd = DEFAULT_PRODUCTS[baseId];
+        const defaultPrice = defaultProd ? defaultProd.price : 0;
+        const basePrice = parsedCustom[baseId] !== undefined ? parseFloat(parsedCustom[baseId]) : (ratesLookup[baseId] !== undefined ? parseFloat(ratesLookup[baseId]) : defaultPrice);
+
+        const isNisha = defaultProd ? defaultProd.brand === 'Nisha' : false;
+        const size = defaultProd ? defaultProd.size.toLowerCase() : '';
+
+        const is100ml = isNisha && size === '100 ml';
+        const is200ml = isNisha && size === '200 ml';
+        const is500ml = isNisha && size === '500 ml';
+        const is1L = isNisha && (size === '1 litre' || size === '1 ltr-pet' || size === '1 ltr');
+        const is2L = isNisha && size === '2 ltr';
+
+        if (isBox) {
+            const multiplier = is100ml ? 50 : is200ml ? 25 : is500ml ? 20 : is1L ? 10 : is2L ? 5 : 1;
+            const rate = basePrice * multiplier;
+            total += rate * parseFloat(quantity);
+        } else if (isLtr) {
+            const multiplierLtr = is100ml ? 10 : is200ml ? 5 : is500ml ? 2 : 1;
+            const finalQty = (is100ml || is200ml || is500ml) ? parseFloat(quantity) * multiplierLtr : parseFloat(quantity);
+            total += basePrice * finalQty;
+        } else {
+            // Check if there is an item-specific override in custom rates (for non-variant base products)
+            const itemRate = parsedCustom[key] !== undefined ? parseFloat(parsedCustom[key]) : (ratesLookup[key] !== undefined ? parseFloat(ratesLookup[key]) : defaultPrice);
+            total += itemRate * parseFloat(quantity);
+        }
+    }
+
+    return Math.round(total * 100) / 100;
+}
+
 exports.createBill = async (req, res) => {
     const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
     let { shop_name, village_name, created_by } = req.body;
@@ -141,7 +287,20 @@ exports.createBill = async (req, res) => {
         // 5. Handle Balance Application (Deferred if delivery date is in the future)
         const cartJson = typeof cart === 'string' ? cart : JSON.stringify(cart);
         const ratesJson = typeof custom_rates === 'string' ? custom_rates : JSON.stringify(custom_rates || {});
-        const amount = parseFloat(total_amount) || 0;
+
+        // Fetch DB rates for server-side total verification
+        const [dbRatesRows] = await connection.query('SELECT product_id, rate FROM product_rates');
+        const dbRates = {};
+        dbRatesRows.forEach(row => {
+            dbRates[row.product_id] = parseFloat(row.rate);
+        });
+
+        const computedAmount = recalculateTotalAmount(cart, custom_rates, dbRates);
+        const amount = computedAmount;
+
+        if (total_amount !== undefined && Math.abs(computedAmount - parseFloat(total_amount)) > 1.0) {
+            console.warn(`[SECURITY WARNING] Mismatch in total_amount for Shop #${shop.id}. Client sent: ${total_amount}, Computed: ${computedAmount}. Enforcing computed total.`);
+        }
 
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayStr = dateRows[0].today;
@@ -490,10 +649,37 @@ exports.updateBill = async (req, res) => {
         }
         const actingUserName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : (req.body.created_by || bill.created_by || 'Admin');
 
-        // 2. Calculate difference
+        // 2. Fetch DB rates and calculate secure ground-truth difference
+        const [dbRatesRows] = await connection.query('SELECT product_id, rate FROM product_rates');
+        const dbRates = {};
+        dbRatesRows.forEach(row => {
+            dbRates[row.product_id] = parseFloat(row.rate);
+        });
+
+        // Resolve the cart and custom rates that will be saved after this edit
+        let finalCart = bill.cart;
+        if (cart !== undefined) {
+            finalCart = typeof cart === 'string' ? JSON.parse(cart) : cart;
+        } else {
+            try { if (typeof finalCart === 'string') finalCart = JSON.parse(finalCart); } catch (e) { finalCart = {}; }
+        }
+
+        let finalCustomRates = bill.custom_rates;
+        if (custom_rates !== undefined) {
+            finalCustomRates = typeof custom_rates === 'string' ? JSON.parse(custom_rates) : custom_rates;
+        } else {
+            try { if (typeof finalCustomRates === 'string') finalCustomRates = JSON.parse(finalCustomRates); } catch (e) { finalCustomRates = {}; }
+        }
+
+        const computedAmount = recalculateTotalAmount(finalCart, finalCustomRates, dbRates);
+
         const oldAmount = parseFloat(bill.total_amount);
-        const newAmount = total_amount !== undefined ? parseFloat(total_amount) : oldAmount;
+        const newAmount = computedAmount;
         const diff = newAmount - oldAmount;
+
+        if (total_amount !== undefined && Math.abs(computedAmount - parseFloat(total_amount)) > 1.0) {
+            console.warn(`[SECURITY WARNING] Mismatch in total_amount for Shop #${bill.shop_id} during edit. Client sent: ${total_amount}, Computed: ${computedAmount}. Enforcing computed total.`);
+        }
 
         // 3. Update shop balance and fix the original 'Bill' transaction amount
         //    (DO NOT insert a new Adjustment — rebuildRipple reads 'Bill' type transactions

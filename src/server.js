@@ -3,6 +3,8 @@ const cors = require('cors');
 const compression = require('compression');
 const dotenv = require('dotenv');
 const Sentry = require('@sentry/node');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 dotenv.config();
 
@@ -38,10 +40,35 @@ if (process.env.SENTRY_DSN) {
     app.use(Sentry.Handlers.requestHandler());
 }
 
-app.use(cors());
+// Global HTTP Security Headers Protection
+app.use(helmet());
+
+// Configure restricted CORS policy
+const allowedOrigins = process.env.ALLOWED_CLIENT_URLS?.split(',') || ['http://localhost:5173', 'http://localhost:5174'];
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS policy'));
+        }
+    },
+    credentials: true
+}));
+
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// Enforce API rate-limiting on authentication entry points to protect against brute force
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 50, // Allow maximum 50 requests per 15 minutes per IP
+    message: { error: 'Too many authentication attempts. Please try again after 15 minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/auth/login', authLimiter);
 
 // 3. Register Structured logging and performance middleware
 const requestLogger = require('./middleware/requestLogger');

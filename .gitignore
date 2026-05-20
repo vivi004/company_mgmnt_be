@@ -33,3 +33,10 @@ dist-ssr
 *.txt
 creds_check.json
 db_creds.txt
+
+# Temporary / Scratch directories
+scratch/
+scratch
+debug_*.js
+*.js.map
+

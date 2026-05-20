@@ -44,7 +44,11 @@ if (process.env.SENTRY_DSN) {
 app.use(helmet());
 
 // Configure restricted CORS policy
-const allowedOrigins = process.env.ALLOWED_CLIENT_URLS?.split(',') || ['http://localhost:5173', 'http://localhost:5174'];
+const allowedOrigins = process.env.ALLOWED_CLIENT_URLS?.split(',') || [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://company-mgmnt-fe.onrender.com'
+];
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin || allowedOrigins.includes(origin)) {
@@ -55,6 +59,7 @@ app.use(cors({
     },
     credentials: true
 }));
+
 
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));

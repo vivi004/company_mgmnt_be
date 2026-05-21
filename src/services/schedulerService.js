@@ -179,6 +179,73 @@ async function applyDueBills() {
 }
 
 /**
+ * TASK 3: Prune Ledger Transactions older than 3 months (90 days)
+ * Automatically keeps only last 3 months records in shop_transactions, 
+ * while carrying forward the balance_after as the new opening_balance in shop_balances.
+ */
+async function pruneOldLedgerTransactions() {
+    console.log('[CRON] Pruning ledger transactions older than 3 months...');
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Get current date minus 90 days in IST
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const pruneThresholdDate = new Date(istNow.getTime() - 90 * 24 * 60 * 60 * 1000);
+        const thresholdStr = pruneThresholdDate.toISOString().slice(0, 19).replace('T', ' ');
+
+        // 2. Find the latest transaction for each shop that is older than the threshold and not pending
+        const [lastOldTxs] = await connection.query(`
+            SELECT t1.shop_id, t1.balance_after, t1.transaction_date
+            FROM shop_transactions t1
+            INNER JOIN (
+                SELECT shop_id, MAX(id) as max_id
+                FROM shop_transactions
+                WHERE transaction_date < ?
+                  AND approval_status != 'PENDING'
+                GROUP BY shop_id
+            ) t2 ON t1.id = t2.max_id
+            FOR UPDATE
+        `, [thresholdStr]);
+
+        if (lastOldTxs.length === 0) {
+            console.log('[CRON] No old ledger transactions to prune.');
+            await connection.commit();
+            return;
+        }
+
+        console.log(`[CRON] Found old transactions for ${lastOldTxs.length} shops to carry forward & prune.`);
+
+        // 3. For each shop, update the opening_balance to be the balance_after of the latest pruned transaction
+        for (const tx of lastOldTxs) {
+            const shopId = tx.shop_id;
+            const newOpeningBal = parseFloat(tx.balance_after) || 0;
+
+            await connection.query(`
+                INSERT INTO shop_balances (shop_id, balance, opening_balance) 
+                VALUES (?, ?, ?) 
+                ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)
+            `, [shopId, newOpeningBal, newOpeningBal]);
+        }
+
+        // 4. Delete all transactions older than the threshold
+        const [deleteResult] = await connection.query(`
+            DELETE FROM shop_transactions 
+            WHERE transaction_date < ?
+              AND approval_status != 'PENDING'
+        `, [thresholdStr]);
+
+        await connection.commit();
+        console.log(`[CRON] Pruned ${deleteResult.affectedRows} transactions older than 3 months.`);
+    } catch (err) {
+        await connection.rollback();
+        console.error('[CRON] pruneOldLedgerTransactions error:', err.message);
+    } finally {
+        connection.release();
+    }
+}
+
+/**
  * Start all scheduled tasks.
  * Cron at 18:30 UTC = 00:00 IST daily.
  */
@@ -186,13 +253,23 @@ function startScheduler() {
     // 00:00 IST = 18:30 UTC → cron: '30 18 * * *'
     cron.schedule('30 18 * * *', async () => {
         console.log('[CRON] Midnight IST triggered.');
-        await applyDueBills();      // Apply delivery-date bills first
-        await runMidnightRollover(); // Then roll over balances
+        await applyDueBills();              // Apply delivery-date bills first
+        await runMidnightRollover();         // Then roll over balances
+        await pruneOldLedgerTransactions();  // And prune old transactions
     }, {
         timezone: 'UTC'
     });
 
     console.log('[SCHEDULER] Midnight IST rollover scheduled (18:30 UTC = 00:00 IST).');
+
+    // Also run it once immediately on server startup to clean up historical data right away!
+    setTimeout(async () => {
+        try {
+            await pruneOldLedgerTransactions();
+        } catch (e) {
+            console.error('[SCHEDULER] Immediate startup prune failed:', e.message);
+        }
+    }, 5000);
 }
 
-module.exports = { startScheduler, runMidnightRollover, applyDueBills };
+module.exports = { startScheduler, runMidnightRollover, applyDueBills, pruneOldLedgerTransactions };

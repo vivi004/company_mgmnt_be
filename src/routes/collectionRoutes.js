@@ -6,6 +6,9 @@ const authMiddleware = require('../middleware/authMiddleware');
 // GET all collections for a date (Admin)
 router.get('/', authMiddleware, collectionController.getCollectionsByDate);
 
+// GET overall returned products for a date (Admin)
+router.get('/returns', authMiddleware, collectionController.getDailyReturns);
+
 // GET collections for a specific order line + date (Admin + Staff)
 router.get('/by-orderline/:olId', authMiddleware, collectionController.getCollectionsByOrderLine);
 

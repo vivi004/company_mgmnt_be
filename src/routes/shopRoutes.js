@@ -23,6 +23,7 @@ router.delete('/:id', authMiddleware, shopController.deleteShop);
 router.post('/:id/collect-payment', authMiddleware, shopController.collectPayment);
 router.get('/:id/ledger', authMiddleware, shopController.getShopLedger);
 router.post('/:id/adjust-balance', authMiddleware, shopController.adjustBalance);
+router.post('/:id/product-return', authMiddleware, shopController.recordProductReturn);
 router.post('/sync-all-to-ledger', authMiddleware, shopController.syncAllShopsToLedger);
 
 // Approval Workflow

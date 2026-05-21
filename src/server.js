@@ -249,10 +249,36 @@ app.listen(PORT, async () => {
             )
         `);
 
+        // Ensure product_returns table exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS product_returns (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                shop_id INT NOT NULL,
+                product_name VARCHAR(255) NOT NULL,
+                amount DECIMAL(12, 2) NOT NULL,
+                created_by VARCHAR(255) NOT NULL,
+                return_date DATE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
+            )
+        `);
+
+        // Alter shop_transactions ENUM to include 'Return'
+        try {
+            await db.query(`
+                ALTER TABLE shop_transactions 
+                MODIFY COLUMN type ENUM('Bill', 'Payment', 'Adjustment', 'Opening Balance', 'Return') NOT NULL
+            `);
+            console.log("Updated shop_transactions type enum to support 'Return'");
+        } catch (e) {
+            console.error('Warning altering shop_transactions type:', e.message);
+        }
+
         // Ensure daily_collections has all required columns
         const dcColumns = [
             { name: 'future_bills', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
             { name: 'manual_adjustments', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
+            { name: 'return_amount', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
         ];
 
         // Retrieve existing columns for daily_collections to prevent duplicate column exception logs

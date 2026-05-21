@@ -59,13 +59,15 @@ async function rebuildRipple(connection, shopId, targetDate) {
             runningBalance -= amount;
         } else if (type === 'Adjustment') {
             runningBalance += amount; 
+        } else if (type === 'Return') {
+            runningBalance -= amount;
         }
 
         // Store new balance in-memory to update later in batch
         tx.new_balance_after = runningBalance;
 
         if (!dailyAggregates[dateStr]) {
-            dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0 };
+            dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
         }
         
         if (type === 'Bill') {
@@ -82,6 +84,8 @@ async function rebuildRipple(connection, shopId, targetDate) {
             }
         } else if (type === 'Adjustment') {
             dailyAggregates[dateStr].adj += amount;
+        } else if (type === 'Return') {
+            dailyAggregates[dateStr].returns += amount;
         }
     }
 
@@ -130,10 +134,10 @@ async function rebuildRipple(connection, shopId, targetDate) {
     // Calculate all daily_collections updates in-memory
     for (const d of dates) {
         const dStr = toISTDate(d.collection_date);
-        const agg = dailyAggregates[dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0 };
+        const agg = dailyAggregates[dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
         
         const newOldBal = lastDayTotal;
-        const newTotalBal = newOldBal + agg.bill - (agg.cash + agg.upi + agg.cheque) + agg.adj;
+        const newTotalBal = newOldBal + agg.bill - (agg.cash + agg.upi + agg.cheque) + agg.adj - (agg.returns || 0);
 
         const dayFutureBills = futureBillRows
             .filter(b => b.del_date && toISTDate(b.del_date) > dStr)
@@ -147,6 +151,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
             upi_collected: agg.upi,
             cheque_collected: agg.cheque,
             manual_adjustments: agg.adj,
+            return_amount: agg.returns || 0,
             total_balance: newTotalBal,
             future_bills: dayFutureBills
         });
@@ -157,7 +162,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
     // HIGH-PERFORMANCE BATCH UPDATE 2: daily_collections
     if (dcUpdates.length > 0) {
         let dcSql = 'UPDATE daily_collections SET ';
-        const fields = ['old_balance', 'todays_bill_amount', 'cash_collected', 'upi_collected', 'cheque_collected', 'manual_adjustments', 'total_balance', 'future_bills'];
+        const fields = ['old_balance', 'todays_bill_amount', 'cash_collected', 'upi_collected', 'cheque_collected', 'manual_adjustments', 'return_amount', 'total_balance', 'future_bills'];
         const sqlParts = [];
         const dcParams = [];
 

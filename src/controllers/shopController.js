@@ -880,6 +880,137 @@ const repairAllShopsRipple = async (req, res) => {
     }
 };
 
+// POST Record Product Return
+const recordProductReturn = async (req, res) => {
+    const { id } = req.params;
+    let { product_name, amount, created_by, collection_date } = req.body;
+
+    if (!product_name || !amount) {
+        return res.status(400).json({ error: 'Product name and return amount are required' });
+    }
+
+    // Safety check: If created_by is missing, fetch the acting user's name from the DB
+    if (!created_by && req.user && req.user.id) {
+        try {
+            const [users] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
+            if (users.length > 0) {
+                created_by = `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+            }
+        } catch (e) {
+            console.error('Failed to fetch user name for return collection:', e);
+        }
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Get current shop and balance
+        const [shops] = await connection.query(`
+            SELECT s.id, s.shop_name, s.village_name, s.order_line_id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
+            FROM shops s
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+            WHERE s.id = ? FOR UPDATE
+        `, [id]);
+        
+        if (shops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
+        }
+        const shop = shops[0];
+
+        let shopOrderLineId = shop.order_line_id;
+        if (!shopOrderLineId) {
+            const [ols] = await connection.query('SELECT id FROM order_lines WHERE TRIM(name) = TRIM(?) LIMIT 1', [shop.village_name]);
+            if (ols.length > 0) {
+                shopOrderLineId = ols[0].id;
+                await connection.query('UPDATE shops SET order_line_id = ? WHERE id = ?', [shopOrderLineId, id]);
+            }
+        }
+        if (!shopOrderLineId) throw new Error("Shop is not linked to any Order Line.");
+
+        const returnAmount = parseFloat(amount);
+        const currentBalance = parseFloat(shop.balance) || 0;
+
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
+        const targetDate = collection_date || todayIST;
+
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS in IST
+        const mysqlDate = collection_date
+            ? `${collection_date} ${currentISTTime}`
+            : istNow.toISOString().slice(0, 19).replace('T', ' ');
+
+        const newBalance = currentBalance - returnAmount;
+
+        // 2. Update shop_balances
+        await connection.query(
+            'UPDATE shop_balances SET balance = ? WHERE shop_id = ?',
+            [newBalance, id]
+        );
+
+        // 3. Insert detailed Product Return item
+        await connection.query(`
+            INSERT INTO product_returns (shop_id, product_name, amount, created_by, return_date)
+            VALUES (?, ?, ?, ?, ?)
+        `, [id, product_name, returnAmount, created_by || 'Staff', targetDate]);
+
+        // 4. Insert Transaction in shop_transactions
+        await connection.query(`
+            INSERT INTO shop_transactions 
+                (shop_id, type, amount, payment_mode, transaction_category, description, 
+                 balance_after, approval_status, affects_balance, created_by, transaction_date) 
+             VALUES (?, 'Return', ?, 'Return', 'RETURN', ?, ?, 'APPROVED', 1, ?, ?)
+        `, [id, returnAmount, `Product Return: ${product_name} (₹${returnAmount})`, 
+             newBalance, created_by || 'Staff', mysqlDate]);
+
+        // 5. Update daily_collections return_amount
+        await connection.query(`
+            INSERT INTO daily_collections
+                (shop_id, shop_name, village_name, order_line_id, collection_date,
+                 return_amount, old_balance, total_balance,
+                 future_bills, manual_adjustments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            ON DUPLICATE KEY UPDATE
+                return_amount = return_amount + VALUES(return_amount),
+                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments - return_amount
+        `, [id, shop.shop_name, shop.village_name, shopOrderLineId,
+            targetDate, returnAmount, currentBalance, newBalance]);
+
+        // 6. SOURCE-OF-TRUTH RIPPLE
+        await financialService.rebuildRipple(connection, id, targetDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        // Push to Webhook
+        webhookService.sendTransactionToWebhook({
+            shop_id: id,
+            shop_name: shop.shop_name,
+            village_name: shop.village_name,
+            specific_area: shop.specific_area,
+            type: 'Return',
+            amount: -returnAmount,
+            payment_method: 'Return',
+            description: `Product Return: ${product_name}`,
+            balance_before: currentBalance,
+            balance_after: newBalance,
+            created_by: created_by || 'Staff'
+        });
+
+        res.json({ 
+            message: 'Product return recorded successfully', 
+            new_balance: newBalance
+        });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
 module.exports = { 
     getShopsByOrderLine, 
     getAllShops, 
@@ -893,5 +1024,6 @@ module.exports = {
     approveTransaction,
     rejectTransaction,
     repairShopRipple,
-    repairAllShopsRipple
+    repairAllShopsRipple,
+    recordProductReturn
 };

@@ -23,7 +23,7 @@ exports.getCollectionsByDate = async (req, res) => {
         const [rows] = await db.query(`
             SELECT dc.id, dc.shop_id, dc.shop_name, dc.village_name, dc.order_line_id, dc.collection_date,
                    dc.todays_bill_amount, dc.cash_collected, dc.upi_collected, dc.cheque_collected,
-                   dc.old_balance, dc.total_balance, dc.future_bills, dc.manual_adjustments, dc.last_updated,
+                   dc.old_balance, dc.total_balance, dc.future_bills, dc.manual_adjustments, dc.return_amount, dc.last_updated,
                    ol.name AS order_line_name, ol.node_id
             FROM daily_collections dc
             JOIN order_lines ol ON dc.order_line_id = ol.id
@@ -98,6 +98,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(dc.cheque_collected, 0) AS cheque_collected,
                 COALESCE(dc.future_bills, 0) AS future_bills,
                 COALESCE(dc.manual_adjustments, 0) AS manual_adjustments,
+                COALESCE(dc.return_amount, 0) AS return_amount,
                 
                 -- APPROVED Manual Adjustment Breakdown
                 COALESCE(adj.discount_payment, 0) AS discount_payment,
@@ -116,7 +117,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 -- The TOTAL BAL logic
                 COALESCE(
                     dc.total_balance,
-                    COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0)
+                    COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
                 ) AS total_balance
             FROM shops s
             JOIN order_lines ol ON s.order_line_id = ol.id
@@ -258,5 +259,31 @@ exports.deleteExpense = async (req, res) => {
     } catch (err) {
         console.error('deleteExpense error:', err);
         res.status(500).json({ error: 'Failed to delete expense' });
+    }
+};
+
+/**
+ * GET /api/collections/returns?date=YYYY-MM-DD
+ * Retrieves all returned products for a specific date across all shops.
+ */
+exports.getDailyReturns = async (req, res) => {
+    const { date } = req.query;
+    if (!date) {
+        return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
+    }
+
+    try {
+        const [rows] = await db.query(`
+            SELECT pr.id, pr.shop_id, pr.product_name, pr.amount, pr.created_by, pr.return_date,
+                   s.shop_name, s.village_name
+            FROM product_returns pr
+            JOIN shops s ON pr.shop_id = s.id
+            WHERE pr.return_date = ?
+            ORDER BY s.shop_name ASC, pr.created_at ASC
+        `, [date]);
+        res.json(rows);
+    } catch (err) {
+        console.error('getDailyReturns error:', err);
+        res.status(500).json({ error: 'Failed to fetch returns' });
     }
 };

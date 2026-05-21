@@ -528,7 +528,7 @@ exports.deleteBill = async (req, res) => {
 
         // 2. Get shop details (Try ID first, then fallback to name for legacy bills)
         let [shops] = await connection.query(`
-            SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id 
+            SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id, s.owner_name as specific_area 
             FROM shops s
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE s.id = ? FOR UPDATE
@@ -536,7 +536,7 @@ exports.deleteBill = async (req, res) => {
         
         if (shops.length === 0) {
             [shops] = await connection.query(`
-                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id 
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.shop_name, s.village_name, s.order_line_id, s.owner_name as specific_area 
                 FROM shops s
                 LEFT JOIN shop_balances sb ON s.id = sb.shop_id
                 WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
@@ -557,18 +557,22 @@ exports.deleteBill = async (req, res) => {
                 );
             }
 
-            // 5. Push to Webhook
-            webhookService.sendTransactionToWebhook({
-                shop_id: shop.id,
-                shop_name: bill.shop_name,
-                village_name: bill.village_name,
-                type: 'Cancellation',
-                amount: -amount,
-                description: `Cancelled Invoice #${bill.invoice_no}`,
-                balance_before: parseFloat(shop.balance),
-                balance_after: parseFloat(shop.balance) - amount,
-                created_by: actingUserName
-            });
+            // 5. Push to Webhook (Only if the bill was actually applied to the balance)
+            if (bill.is_applied_to_balance) {
+                webhookService.sendTransactionToWebhook({
+                    shop_id: shop.id,
+                    shop_name: bill.shop_name,
+                    village_name: bill.village_name,
+                    specific_area: shop.specific_area || '',
+                    type: 'Cancellation',
+                    amount: -amount,
+                    description: `Cancelled Invoice #${bill.invoice_no}`,
+                    balance_before: parseFloat(shop.balance),
+                    balance_after: parseFloat(shop.balance) - amount,
+                    created_by: actingUserName,
+                    ref_id: `INV-${bill.invoice_no}`
+                });
+            }
 
             // 5b. Reverse from daily_collections
             const delDateStr = bill.delivery_date_str || bill.bill_date_str;
@@ -720,21 +724,6 @@ exports.updateBill = async (req, res) => {
                     [newAmount, `Invoice #${bill.invoice_no} (Edited)`, shop.id, id]
                 );
 
-                // Push price-change audit to Webhook (Google Sheets)
-                webhookService.sendTransactionToWebhook({
-                    shop_id:        shop.id,
-                    shop_name:      bill.shop_name,
-                    village_name:   bill.village_name,
-                    specific_area:  shop.specific_area || '',      // Column E
-                    type:           'Bill Edit',                   // Column B
-                    amount:         newAmount,                     // Column F — new total
-                    payment_method: 'Edit',                        // Column G
-                    description:    `Price Edit: Invoice #${bill.invoice_no} (₹${oldAmount} → ₹${newAmount})`, // Column H
-                    balance_before: parseFloat(shop.balance),      // Column I
-                    balance_after:  parseFloat(shop.balance) + diff, // Column J
-                    created_by:     actingUserName,                // Column K
-                    ref_id:         `INV-${bill.invoice_no}`       // Column L
-                });
             }
         }
 
@@ -870,24 +859,61 @@ exports.updateBill = async (req, res) => {
                 );
                 const finalBalance = finalBalRow.length > 0 ? parseFloat(finalBalRow[0].balance) : 0;
 
-                const changes = [];
-                if (diff !== 0) changes.push(`Amount: ₹${oldAmount} → ₹${newAmount}`);
-                if (oldDateStr !== newDateStr) changes.push(`Date: ${oldDateStr} → ${newDateStr}`);
+                // Scenario 1: Applied → Applied (Both old and new were active/applied)
+                if (!isOldFuture && !isFutureNew) {
+                    const changes = [];
+                    if (diff !== 0) changes.push(`Amount: ₹${oldAmount} → ₹${newAmount}`);
+                    if (oldDateStr !== newDateStr) changes.push(`Date: ${oldDateStr} → ${newDateStr}`);
 
-                webhookService.sendTransactionToWebhook({
-                    shop_id:        collShop.id,
-                    shop_name:      collShop.shop_name,
-                    village_name:   collShop.village_name,
-                    specific_area:  collShop.specific_area || '',    // Column E
-                    type:           'Bill Edit',                     // Column B
-                    amount:         newAmount,                       // Column F — new total
-                    payment_method: 'Edit',                          // Column G
-                    description:    `Invoice #${bill.invoice_no}: ${changes.join(', ')}`, // Column H
-                    balance_before: balanceBefore,               // Column I — true pre-edit balance
-                    balance_after:  finalBalance,                 // Column J — accurate post-ripple balance
-                    created_by:     actingUserName,                  // Column K
-                    ref_id:         `INV-${bill.invoice_no}`         // Column L
-                });
+                    webhookService.sendTransactionToWebhook({
+                        shop_id:        collShop.id,
+                        shop_name:      collShop.shop_name,
+                        village_name:   collShop.village_name,
+                        specific_area:  collShop.specific_area || '',    // Column E
+                        type:           'Bill Edit',                     // Column B
+                        amount:         newAmount,                       // Column F — new total
+                        payment_method: 'Edit',                          // Column G
+                        description:    `Invoice #${bill.invoice_no}: ${changes.join(', ')}`, // Column H
+                        balance_before: balanceBefore,                   // Column I — true pre-edit balance
+                        balance_after:  finalBalance,                     // Column J — accurate post-ripple balance
+                        created_by:     actingUserName,                  // Column K
+                        ref_id:         `INV-${bill.invoice_no}`         // Column L
+                    });
+                }
+                // Scenario 2: Applied → Future (Was active, now deferred to future delivery)
+                else if (!isOldFuture && isFutureNew) {
+                    webhookService.sendTransactionToWebhook({
+                        shop_id:        collShop.id,
+                        shop_name:      collShop.shop_name,
+                        village_name:   collShop.village_name,
+                        specific_area:  collShop.specific_area || '',
+                        type:           'Cancellation',
+                        amount:         -oldAmount,
+                        description:    `Deferred Invoice #${bill.invoice_no} (Moved to Future)`,
+                        balance_before: balanceBefore,
+                        balance_after:  finalBalance,
+                        created_by:     actingUserName,
+                        ref_id:         `INV-${bill.invoice_no}`
+                    });
+                }
+                // Scenario 3: Future → Applied (Was deferred, now active/due today or past)
+                else if (isOldFuture && !isFutureNew) {
+                    webhookService.sendTransactionToWebhook({
+                        shop_id:        collShop.id,
+                        shop_name:      collShop.shop_name,
+                        village_name:   collShop.village_name,
+                        specific_area:  collShop.specific_area || '',
+                        type:           'Bill',
+                        amount:         newAmount,
+                        description:    `Invoice #${bill.invoice_no} Applied`,
+                        balance_before: balanceBefore,
+                        balance_after:  finalBalance,
+                        created_by:     actingUserName,
+                        ref_id:         `INV-${bill.invoice_no}`
+                    });
+                }
+                // Scenario 4: Future → Future (Remains deferred/future-dated)
+                // - No webhook is sent because the bill was never on the active ledger.
             }
         }
 

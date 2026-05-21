@@ -136,7 +136,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
         const newTotalBal = newOldBal + agg.bill - (agg.cash + agg.upi + agg.cheque) + agg.adj;
 
         const dayFutureBills = futureBillRows
-            .filter(b => b.del_date && b.del_date.toISOString().split('T')[0] > dStr)
+            .filter(b => b.del_date && toISTDate(b.del_date) > dStr)
             .reduce((sum, b) => sum + parseFloat(b.total_amount), 0);
 
         dcUpdates.push({

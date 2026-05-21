@@ -792,7 +792,7 @@ const approveTransaction = async (req, res) => {
             specific_area: shop.owner_name,
             type: tx.type,
             amount: isPayment ? -amount : amount,
-            payment_method: tx.payment_method,
+            payment_method: tx.payment_mode,
             description: tx.description + ' (APPROVED)',
             balance_before: currentBalance,
             balance_after: newBalance,

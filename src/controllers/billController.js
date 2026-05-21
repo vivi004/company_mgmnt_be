@@ -633,6 +633,7 @@ exports.updateBill = async (req, res) => {
         const [bills] = await connection.query(`
             SELECT shop_id, shop_name, village_name, total_amount, invoice_no, created_by,
             is_applied_to_balance,
+            delivery_date,
             DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str, 
             DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str,
             cart, custom_rates, is_edited_price 
@@ -789,8 +790,8 @@ exports.updateBill = async (req, res) => {
             await connection.query(
                 'UPDATE bills SET cart=?, custom_rates=?, total_amount=?, delivery_date=?, is_edited_price=?, is_applied_to_balance=? WHERE id=?',
                 [
-                    JSON.stringify(cart !== undefined ? cart : bill.cart),
-                    JSON.stringify(custom_rates !== undefined ? custom_rates : bill.custom_rates),
+                    JSON.stringify(finalCart),
+                    JSON.stringify(finalCustomRates),
                     newAmount, mysqlDeliveryDate, isEditedPriceFinal,
                     isFutureNew ? 0 : 1, id
                 ]

@@ -264,23 +264,42 @@ exports.deleteExpense = async (req, res) => {
 
 /**
  * GET /api/collections/returns?date=YYYY-MM-DD
- * Retrieves all returned products for a specific date across all shops.
+ * OR /api/collections/returns?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Retrieves all returned products for a specific date or date range across all shops.
  */
 exports.getDailyReturns = async (req, res) => {
-    const { date } = req.query;
-    if (!date) {
-        return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
+    const { date, startDate, endDate } = req.query;
+    if (!date && (!startDate || !endDate)) {
+        return res.status(400).json({ error: 'Either "date" or both "startDate" and "endDate" parameters are required' });
     }
 
     try {
-        const [rows] = await db.query(`
+        let query = `
             SELECT pr.id, pr.shop_id, pr.product_name, pr.amount, pr.created_by, pr.return_date,
                    s.shop_name, s.village_name
             FROM product_returns pr
             JOIN shops s ON pr.shop_id = s.id
-            WHERE pr.return_date = ?
-            ORDER BY s.shop_name ASC, pr.created_at ASC
-        `, [date]);
+            WHERE 1=1
+        `;
+        const params = [];
+
+        if (date) {
+            query += ' AND pr.return_date = ?';
+            params.push(date);
+        } else {
+            if (startDate) {
+                query += ' AND pr.return_date >= ?';
+                params.push(startDate);
+            }
+            if (endDate) {
+                query += ' AND pr.return_date <= ?';
+                params.push(endDate);
+            }
+        }
+
+        query += ' ORDER BY pr.return_date ASC, s.shop_name ASC, pr.created_at ASC';
+
+        const [rows] = await db.query(query, params);
         res.json(rows);
     } catch (err) {
         console.error('getDailyReturns error:', err);

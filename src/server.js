@@ -274,6 +274,18 @@ app.listen(PORT, async () => {
             console.error('Warning altering shop_transactions type:', e.message);
         }
 
+        // Alter shop_transactions ENUM to include 'RETURN' in transaction_category
+        try {
+            await db.query(`
+                ALTER TABLE shop_transactions 
+                MODIFY COLUMN transaction_category ENUM('BILL', 'PAYMENT', 'MANUAL_ADJUST', 'RETURN') DEFAULT 'PAYMENT'
+            `);
+            console.log("Updated shop_transactions transaction_category enum to support 'RETURN'");
+        } catch (e) {
+            console.error('Warning altering shop_transactions transaction_category:', e.message);
+        }
+
+
         // Ensure daily_collections has all required columns
         const dcColumns = [
             { name: 'future_bills', type: 'DECIMAL(12, 2) DEFAULT 0.00' },

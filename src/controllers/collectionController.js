@@ -112,15 +112,16 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(pt.pending_json, '[]') AS pending_transactions,
 
                 -- The PREV BAL logic
-                COALESCE(dc.old_balance, COALESCE(prev.total_balance, 0)) AS old_balance,
+                COALESCE(dc.old_balance, COALESCE(prev.total_balance, COALESCE(sb.balance, 0))) AS old_balance,
 
                 -- The TOTAL BAL logic
                 COALESCE(
                     dc.total_balance,
-                    COALESCE(prev.total_balance, 0) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
+                    COALESCE(prev.total_balance, COALESCE(sb.balance, 0)) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
                 ) AS total_balance
             FROM shops s
             JOIN order_lines ol ON s.order_line_id = ol.id
+            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             LEFT JOIN daily_collections dc ON s.id = dc.shop_id AND dc.collection_date = ?
             LEFT JOIN (
                 SELECT dc1.shop_id, dc1.total_balance

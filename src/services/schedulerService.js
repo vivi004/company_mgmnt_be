@@ -8,60 +8,19 @@ const webhookService = require('./webhookService');
  */
 function getISTDateString(offsetDays = 0) {
     const now = new Date();
-    const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000);
+    // Add a 30-second safety padding to prevent clock drift during cron execution near midnight
+    const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000 + 30000 + offsetDays * 24 * 60 * 60 * 1000);
     return istNow.toISOString().split('T')[0];
 }
 
 /**
  * TASK 1: Midnight Rollover
- * Carries yesterday's total_balance → today's old_balance for all shops.
- * Runs every day at 00:00 IST (18:30 UTC).
+ * (Refactored: Skip bulk seeding of empty 0.00 rows to prevent DB clutter and double entries.
+ * All balance logic and reports compute balances dynamically when there's no transaction.)
  */
 async function runMidnightRollover() {
     const todayIST = getISTDateString(0);
-
-    console.log(`[CRON] Running robust midnight rollover for ${todayIST}`);
-
-    try {
-        // This query seeds EVERY shop with a row for today.
-        // It finds the most recent total_balance (from any previous date) and carries it forward as today's old_balance.
-        await db.query(`
-            INSERT INTO daily_collections 
-                (shop_id, shop_name, village_name, order_line_id, collection_date, 
-                 old_balance, todays_bill_amount, total_balance, future_bills, manual_adjustments)
-            SELECT 
-                s.id as shop_id, 
-                s.shop_name, 
-                s.village_name, 
-                s.order_line_id, 
-                ? as collection_date,
-                COALESCE(prev.total_balance, COALESCE(sb.balance, 0)) as old_balance,
-                0 as todays_bill_amount,
-                COALESCE(prev.total_balance, COALESCE(sb.balance, 0)) as total_balance,
-                0 as future_bills,
-                0 as manual_adjustments
-            FROM shops s
-            LEFT JOIN shop_balances sb ON s.id = sb.shop_id
-            LEFT JOIN (
-                SELECT dc1.shop_id, dc1.total_balance
-                FROM daily_collections dc1
-                INNER JOIN (
-                    SELECT shop_id, MAX(collection_date) as max_date
-                    FROM daily_collections
-                    WHERE collection_date < ?
-                    GROUP BY shop_id
-                ) dc2 ON dc1.shop_id = dc2.shop_id AND dc1.collection_date = dc2.max_date
-            ) prev ON s.id = prev.shop_id
-            WHERE s.order_line_id IS NOT NULL
-            ON DUPLICATE KEY UPDATE
-                old_balance = VALUES(old_balance),
-                total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-        `, [todayIST, todayIST]);
-
-        console.log(`[CRON] Midnight rollover complete for all active shops.`);
-    } catch (err) {
-        console.error('[CRON] Midnight rollover error:', err.message);
-    }
+    console.log(`[CRON] Midnight rollover triggered for ${todayIST}. Skipping bulk 0-value pre-seeding to keep database clean and prevent double entries.`);
 }
 
 /**
@@ -235,8 +194,20 @@ async function pruneOldLedgerTransactions() {
               AND approval_status != 'PENDING'
         `, [thresholdStr]);
 
+        // 5. Clean up redundant 0-value daily collection records to prevent database bloat
+        const [pruneDcResult] = await connection.query(`
+            DELETE FROM daily_collections 
+            WHERE todays_bill_amount = 0 
+              AND cash_collected = 0 
+              AND upi_collected = 0 
+              AND cheque_collected = 0 
+              AND manual_adjustments = 0 
+              AND return_amount = 0
+        `);
+
         await connection.commit();
         console.log(`[CRON] Pruned ${deleteResult.affectedRows} transactions older than 3 months.`);
+        console.log(`[CRON] Cleaned up ${pruneDcResult.affectedRows || 0} redundant 0-value daily collection records.`);
     } catch (err) {
         await connection.rollback();
         console.error('[CRON] pruneOldLedgerTransactions error:', err.message);

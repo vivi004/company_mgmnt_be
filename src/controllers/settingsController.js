@@ -235,3 +235,29 @@ exports.resetDatabase = async (req, res) => {
         if (connection) connection.release();
     }
 };
+
+// GET /api/settings/bootstrap
+exports.getDashboardBootstrap = async (req, res) => {
+    try {
+        await ensureSettings();
+        await ensureMotorVehiclesTable();
+        await ensureShopsColumns();
+
+        // Query settings, vehicles, unverified bills count, and verified bills count in parallel
+        const [settingsRows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1');
+        const [vehicleRows] = await db.query('SELECT * FROM motor_vehicles ORDER BY created_at DESC');
+        const [unverifiedRows] = await db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Unverified"');
+        const [verifiedRows] = await db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Verified"');
+
+        res.json({
+            invoiceSettings: settingsRows[0] || {},
+            vehicles: vehicleRows || [],
+            unverifiedCount: unverifiedRows[0]?.count || 0,
+            totalBillsCount: verifiedRows[0]?.count || 0
+        });
+    } catch (err) {
+        console.error('Error bootstrapping dashboard:', err);
+        res.status(500).json({ error: 'Failed to bootstrap dashboard data' });
+    }
+};
+

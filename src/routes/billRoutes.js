@@ -7,6 +7,7 @@ router.post('/', authMiddleware, billController.createBill);
 router.get('/', authMiddleware, billController.getAllBills);
 router.get('/unverified', authMiddleware, billController.getUnverifiedBills);
 router.get('/date-range', authMiddleware, billController.getBillsByDateRange);
+router.get('/count', authMiddleware, billController.getBillsCount);
 router.put('/verify/:id', authMiddleware, billController.verifyBill);
 router.put('/:id', authMiddleware, billController.updateBill);
 router.delete('/:id', authMiddleware, billController.deleteBill);

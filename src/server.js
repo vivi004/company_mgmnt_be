@@ -313,6 +313,16 @@ app.listen(PORT, async () => {
         }
 
         console.log('Database tables verified/initialized.');
+
+        // --- PERFORMANCE INDEXES AUTO-MIGRATION ---
+        try {
+            await db.query(`CREATE INDEX IF NOT EXISTS idx_product_returns_shop_date ON product_returns(shop_id, return_date)`);
+            await db.query(`CREATE INDEX IF NOT EXISTS idx_product_returns_date ON product_returns(return_date)`);
+            await db.query(`CREATE INDEX IF NOT EXISTS idx_shop_transactions_paginated ON shop_transactions(shop_id, transaction_date, id DESC)`);
+            console.log('Performance indexes successfully verified/created.');
+        } catch (e) {
+            console.warn('Warning creating performance indexes:', e.message);
+        }
     } catch (err) {
         console.error('Database initialization warning:', err.message);
     }

@@ -5,6 +5,7 @@ const settingsController = require('../controllers/settingsController');
 const authMiddleware = require('../middleware/authMiddleware');
 router.get('/invoice', settingsController.getInvoiceSettings);
 router.put('/invoice', settingsController.updateInvoiceSettings);
+router.get('/bootstrap', settingsController.getDashboardBootstrap);
 
 // Motor Vehicles
 router.get('/vehicles', settingsController.getMotorVehicles);

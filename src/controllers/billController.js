@@ -280,8 +280,11 @@ exports.createBill = async (req, res) => {
                     mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
                 }
             } catch (e) { 
-                mysqlDeliveryDate = null;
+                mysqlDeliveryDate = mysqlDate;
             }
+        }
+        if (!mysqlDeliveryDate) {
+            mysqlDeliveryDate = mysqlDate;
         }
 
         // 5. Handle Balance Application (Deferred if delivery date is in the future)
@@ -442,7 +445,7 @@ exports.getAllBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Verified" 
-            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
+            ORDER BY b.delivery_date DESC, b.id DESC
             LIMIT ? OFFSET ?
         `, [limit, offset]);
         const mapped = rows.map(row => {
@@ -474,7 +477,7 @@ exports.getUnverifiedBills = async (req, res) => {
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
             WHERE b.status = "Unverified" 
-            ORDER BY COALESCE(b.delivery_date, b.bill_date) DESC, b.id DESC
+            ORDER BY b.delivery_date DESC, b.id DESC
             LIMIT ? OFFSET ?
         `, [limit, offset]);
         const mapped = rows.map(row => {
@@ -728,7 +731,10 @@ exports.updateBill = async (req, res) => {
         }
 
         // 6. Delivery Date Handling
-        let mysqlDeliveryDate = bill.delivery_date ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') : null;
+        let mysqlDeliveryDate = bill.delivery_date 
+            ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') 
+            : (bill.bill_date_str ? bill.bill_date_str + ' 00:00:00' : new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' '));
+        
         if (req.body.delivery_date) {
             try {
                 const d = new Date(req.body.delivery_date);
@@ -737,6 +743,10 @@ exports.updateBill = async (req, res) => {
                     mysqlDeliveryDate = istD.toISOString().slice(0, 19).replace('T', ' ');
                 }
             } catch (e) { }
+        }
+
+        if (!mysqlDeliveryDate) {
+            mysqlDeliveryDate = bill.bill_date_str ? bill.bill_date_str + ' 00:00:00' : new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
         }
 
         // 6b. Update daily_collections
@@ -949,18 +959,18 @@ exports.getBillsByDateRange = async (req, res) => {
         const params = [];
 
         if (startDate) {
-            query += ' AND COALESCE(b.delivery_date, b.bill_date) >= ?';
+            query += ' AND b.delivery_date >= ?';
             params.push(startDate);
         }
         if (endDate) {
             // Add 1 day to endDate to include the full end day
             const end = new Date(endDate);
             end.setDate(end.getDate() + 1);
-            query += ' AND COALESCE(b.delivery_date, b.bill_date) < ?';
+            query += ' AND b.delivery_date < ?';
             params.push(end.toISOString().split('T')[0]);
         }
 
-        query += ' GROUP BY b.id ORDER BY b.bill_date DESC LIMIT ? OFFSET ?';
+        query += ' GROUP BY b.id ORDER BY b.delivery_date DESC, b.id DESC LIMIT ? OFFSET ?';
         params.push(limit, offset);
 
         const [rows] = await db.query(query, params);
@@ -975,6 +985,16 @@ exports.getBillsByDateRange = async (req, res) => {
     } catch (err) {
         console.error('Error fetching bills by date range:', err.message || err);
         res.status(500).json({ error: 'Failed to fetch bills by date range', detail: err.message });
+    }
+};
+
+exports.getBillsCount = async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Verified"');
+        res.json({ count: rows[0].count });
+    } catch (err) {
+        console.error('Error fetching bills count:', err.message || err);
+        res.status(500).json({ error: 'Failed to fetch bills count', detail: err.message });
     }
 };
 

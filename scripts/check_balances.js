@@ -24,7 +24,7 @@ async function testQueryForDate(connection, date, shopId) {
                             ORDER BY tx.transaction_date DESC, tx.id DESC 
                             LIMIT 1
                         ),
-                        COALESCE(sb.opening_balance, 0)
+                        IF(DATE(s.created_at) <= ?, COALESCE(sb.opening_balance, 0), 0)
                     )
                 )
             ) AS old_balance,
@@ -44,7 +44,7 @@ async function testQueryForDate(connection, date, shopId) {
                             ORDER BY tx.transaction_date DESC, tx.id DESC 
                             LIMIT 1
                         ),
-                        COALESCE(sb.opening_balance, 0)
+                        IF(DATE(s.created_at) <= ?, COALESCE(sb.opening_balance, 0), 0)
                     )
                 ) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
             ) AS total_balance
@@ -63,7 +63,7 @@ async function testQueryForDate(connection, date, shopId) {
             ) dc2 ON dc1.shop_id = dc2.shop_id AND dc1.collection_date = dc2.max_date
         ) prev ON s.id = prev.shop_id
         WHERE s.id = ?
-    `, [date, date, date, date, date, shopId]);
+    `, [date, date, date, date, date, date, date, shopId]);
     return rows[0];
 }
 

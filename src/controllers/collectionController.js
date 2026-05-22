@@ -128,7 +128,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                                 ORDER BY tx.transaction_date DESC, tx.id DESC 
                                 LIMIT 1
                             ),
-                            COALESCE(sb.opening_balance, 0)
+                            IF(DATE(s.created_at) <= ?, COALESCE(sb.opening_balance, 0), 0)
                         )
                     )
                 ) AS old_balance,
@@ -148,7 +148,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                                 ORDER BY tx.transaction_date DESC, tx.id DESC 
                                 LIMIT 1
                             ),
-                            COALESCE(sb.opening_balance, 0)
+                            IF(DATE(s.created_at) <= ?, COALESCE(sb.opening_balance, 0), 0)
                         )
                     ) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
                 ) AS total_balance
@@ -198,7 +198,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, date, date, date, date, date, olId]);
+        `, [date, date, date, date, date, date, date, date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

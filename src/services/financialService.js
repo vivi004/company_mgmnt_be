@@ -14,7 +14,15 @@ async function rebuildRipple(connection, shopId, targetDate) {
         return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     };
 
-    // 1. Get the starting balance before this date
+    // 1. Get the shop's registration date and opening balance
+    const [shopInfo] = await connection.query(
+        'SELECT COALESCE(sb.opening_balance, 0) as opening_balance, DATE(s.created_at) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id = ?',
+        [shopId]
+    );
+    const createdDateStr = shopInfo.length > 0 ? toISTDate(shopInfo[0].created_date) : '2000-01-01';
+    const openingBalance = shopInfo.length > 0 ? parseFloat(shopInfo[0].opening_balance) : 0;
+
+    // Get the starting balance before this date from approved transactions
     const [prevTx] = await connection.query(
         `SELECT balance_after FROM shop_transactions 
          WHERE shop_id = ? AND transaction_date < ? AND approval_status = 'APPROVED'
@@ -26,11 +34,11 @@ async function rebuildRipple(connection, shopId, targetDate) {
     if (prevTx.length > 0) {
         runningBalance = parseFloat(prevTx[0].balance_after);
     } else {
-        const [shopInfo] = await connection.query(
-            'SELECT COALESCE(opening_balance, 0) as opening_balance FROM shop_balances WHERE shop_id = ?',
-            [shopId]
-        );
-        runningBalance = shopInfo.length > 0 ? parseFloat(shopInfo[0].opening_balance) : 0;
+        if (toISTDate(targetDate) >= createdDateStr) {
+            runningBalance = openingBalance;
+        } else {
+            runningBalance = 0;
+        }
     }
 
     const initialBalance = runningBalance;
@@ -45,6 +53,10 @@ async function rebuildRipple(connection, shopId, targetDate) {
     );
 
     const dailyAggregates = {}; 
+    let openingBalanceApplied = false;
+    if (prevTx.length > 0 || toISTDate(targetDate) >= createdDateStr) {
+        openingBalanceApplied = true;
+    }
 
     // 3. Process transactions in-memory
     for (const tx of transactions) {
@@ -52,6 +64,11 @@ async function rebuildRipple(connection, shopId, targetDate) {
         const type = tx.type;
         const mode = (tx.payment_mode || '').toUpperCase();
         const dateStr = toISTDate(tx.transaction_date);
+
+        if (!openingBalanceApplied && dateStr >= createdDateStr) {
+            runningBalance += openingBalance;
+            openingBalanceApplied = true;
+        }
 
         if (tx.approval_status === 'APPROVED') {
             if (type === 'Bill') {
@@ -89,6 +106,11 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
         // Store new balance in-memory to update later in batch
         tx.new_balance_after = runningBalance;
+    }
+
+    if (!openingBalanceApplied) {
+        runningBalance += openingBalance;
+        openingBalanceApplied = true;
     }
 
     // HIGH-PERFORMANCE BATCH UPDATE 1: shop_transactions
@@ -129,13 +151,27 @@ async function rebuildRipple(connection, shopId, targetDate) {
         [shopId, targetDate]
     );
     
-    let lastDayTotal = prevDay.length > 0 ? parseFloat(prevDay[0].total_balance) : (prevTx.length > 0 ? parseFloat(prevTx[0].balance_after) : initialBalance);
+    let lastDayTotal = prevDay.length > 0 
+        ? parseFloat(prevDay[0].total_balance) 
+        : (prevTx.length > 0 
+            ? parseFloat(prevTx[0].balance_after) 
+            : (toISTDate(targetDate) >= createdDateStr ? openingBalance : 0));
 
     const dcUpdates = [];
+    let dcOpeningBalanceApplied = false;
+    if (prevDay.length > 0 || prevTx.length > 0 || toISTDate(targetDate) >= createdDateStr) {
+        dcOpeningBalanceApplied = true;
+    }
 
     // Calculate all daily_collections updates in-memory
     for (const d of dates) {
         const dStr = toISTDate(d.collection_date);
+        
+        if (!dcOpeningBalanceApplied && dStr >= createdDateStr) {
+            lastDayTotal += openingBalance;
+            dcOpeningBalanceApplied = true;
+        }
+
         const agg = dailyAggregates[dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
         
         const newOldBal = lastDayTotal;

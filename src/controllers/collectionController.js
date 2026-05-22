@@ -1,5 +1,7 @@
 const db = require('../config/db');
 const cacheService = require('../services/cacheService');
+const webhookService = require('../services/webhookService');
+const financialService = require('../services/financialService');
 
 /**
  * GET /api/collections?date=YYYY-MM-DD
@@ -305,5 +307,444 @@ exports.getDailyReturns = async (req, res) => {
     } catch (err) {
         console.error('getDailyReturns error:', err);
         res.status(500).json({ error: 'Failed to fetch returns' });
+    }
+};
+
+/**
+ * GET /api/collections/shop-day-details?shopId=X&date=YYYY-MM-DD
+ * Admin-only: fetches approved ledger transactions and product returns for a specific shop on a specific date.
+ */
+exports.getShopDayDetails = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { shopId, date } = req.query;
+    if (!shopId || !date) {
+        return res.status(400).json({ error: 'shopId and date parameters are required' });
+    }
+    try {
+        // Fetch approved transactions on this date for this shop
+        // Date matches the YYYY-MM-DD range of transaction_date in IST
+        const [transactions] = await db.query(`
+            SELECT id, type, amount, payment_mode, transaction_category, description, transaction_date, created_by
+            FROM shop_transactions
+            WHERE shop_id = ? AND approval_status = 'APPROVED'
+              AND transaction_date >= ? AND transaction_date < DATE_ADD(?, INTERVAL 1 DAY)
+            ORDER BY transaction_date ASC, id ASC
+        `, [shopId, date, date]);
+
+        // Fetch detailed product returns
+        const [returns] = await db.query(`
+            SELECT id, product_name, amount, created_by, return_date
+            FROM product_returns
+            WHERE shop_id = ? AND return_date = ?
+            ORDER BY created_at ASC
+        `, [shopId, date]);
+
+        res.json({ transactions, returns });
+    } catch (err) {
+        console.error('getShopDayDetails error:', err);
+        res.status(500).json({ error: 'Failed to fetch details for shop and date' });
+    }
+};
+
+/**
+ * PUT /api/collections/transactions/:id/payment
+ * Admin-only: edits a payment transaction's details.
+ */
+exports.editPaymentTransaction = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { id } = req.params;
+    const { amount, payment_mode, description } = req.body;
+
+    if (amount === undefined || isNaN(parseFloat(amount)) || parseFloat(amount) < 0) {
+        return res.status(400).json({ error: 'A valid numeric amount is required' });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve existing transaction
+        const [txs] = await connection.query(
+            'SELECT shop_id, type, amount, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
+            [id]
+        );
+        if (txs.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Transaction not found' });
+        }
+        const tx = txs[0];
+        if (tx.type !== 'Payment') {
+            await connection.rollback();
+            return res.status(400).json({ error: 'Transaction is not a payment type' });
+        }
+
+        const newAmount = parseFloat(amount);
+        const newMode = (payment_mode || 'CASH').toUpperCase();
+        const newDesc = description || `Payment Received (${newMode})`;
+
+        // Update transaction row
+        await connection.query(
+            'UPDATE shop_transactions SET amount = ?, payment_mode = ?, description = ? WHERE id = ?',
+            [newAmount, newMode, newDesc, id]
+        );
+
+        // Fetch transaction date formatted as YYYY-MM-DD
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
+        const txDate = dateRows[0].tx_date;
+
+        // Perform balance re-ripple to update daily_collections and shop_balances
+        await financialService.rebuildRipple(connection, tx.shop_id, txDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: 'Payment transaction updated successfully' });
+    } catch (err) {
+        await connection.rollback();
+        console.error('editPaymentTransaction error:', err);
+        res.status(500).json({ error: err.message || 'Failed to update payment transaction' });
+    } finally {
+        connection.release();
+    }
+};
+
+/**
+ * PUT /api/collections/transactions/:id/adjustment
+ * Admin-only: edits a manual adjustment transaction.
+ */
+exports.editAdjustmentTransaction = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { id } = req.params;
+    const { amount, payment_mode, description } = req.body;
+
+    if (amount === undefined || isNaN(parseFloat(amount))) {
+        return res.status(400).json({ error: 'A valid numeric amount is required' });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve existing transaction
+        const [txs] = await connection.query(
+            'SELECT shop_id, type, transaction_date FROM shop_transactions WHERE id = ? FOR UPDATE',
+            [id]
+        );
+        if (txs.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Transaction not found' });
+        }
+        const tx = txs[0];
+        if (tx.type !== 'Adjustment') {
+            await connection.rollback();
+            return res.status(400).json({ error: 'Transaction is not an adjustment' });
+        }
+
+        const newAmount = parseFloat(amount);
+        const newMode = (payment_mode || 'CASH').toUpperCase();
+        const newDesc = description || 'Manual Adjustment';
+
+        // Update transaction row
+        await connection.query(
+            'UPDATE shop_transactions SET amount = ?, payment_mode = ?, payment_method = ?, description = ? WHERE id = ?',
+            [newAmount, newMode, newMode, newDesc, id]
+        );
+
+        // Fetch transaction date formatted as YYYY-MM-DD
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
+        const txDate = dateRows[0].tx_date;
+
+        // Perform balance re-ripple to update daily_collections and shop_balances
+        await financialService.rebuildRipple(connection, tx.shop_id, txDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: 'Adjustment transaction updated successfully' });
+    } catch (err) {
+        await connection.rollback();
+        console.error('editAdjustmentTransaction error:', err);
+        res.status(500).json({ error: err.message || 'Failed to update adjustment transaction' });
+    } finally {
+        connection.release();
+    }
+};
+
+/**
+ * DELETE /api/collections/transactions/:id
+ * Admin-only: deletes a transaction.
+ */
+exports.deleteTransaction = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { id } = req.params;
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve existing transaction
+        const [txs] = await connection.query(
+            'SELECT shop_id, type, amount, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
+            [id]
+        );
+        if (txs.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Transaction not found' });
+        }
+        const tx = txs[0];
+
+        // Format date to YYYY-MM-DD
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
+        const txDate = dateRows[0].tx_date;
+
+        // If transaction is a Return, attempt to clean up product_returns entry
+        if (tx.type === 'Return') {
+            // Find a product return matching this shop, return date, and amount
+            await connection.query(
+                `DELETE FROM product_returns 
+                 WHERE shop_id = ? AND return_date = ? AND amount = ? 
+                 LIMIT 1`,
+                [tx.shop_id, txDate, tx.amount]
+            );
+        }
+
+        // Delete from shop_transactions
+        await connection.query('DELETE FROM shop_transactions WHERE id = ?', [id]);
+
+        // Perform balance re-ripple to update daily_collections and shop_balances
+        await financialService.rebuildRipple(connection, tx.shop_id, txDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: 'Transaction deleted successfully' });
+    } catch (err) {
+        await connection.rollback();
+        console.error('deleteTransaction error:', err);
+        res.status(500).json({ error: err.message || 'Failed to delete transaction' });
+    } finally {
+        connection.release();
+    }
+};
+
+/**
+ * PUT /api/collections/returns/:id
+ * Admin-only: updates an individual product return entry.
+ */
+exports.editProductReturn = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { id } = req.params;
+    const { product_name, amount } = req.body;
+
+    if (!product_name) {
+        return res.status(400).json({ error: 'Product name is required' });
+    }
+    if (amount === undefined || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+        return res.status(400).json({ error: 'A valid positive numeric amount is required' });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve existing return row
+        const [returns] = await connection.query(
+            'SELECT shop_id, product_name, amount, return_date FROM product_returns WHERE id = ? FOR UPDATE',
+            [id]
+        );
+        if (returns.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Product return entry not found' });
+        }
+        const ret = returns[0];
+        const oldAmount = parseFloat(ret.amount);
+        const newAmount = parseFloat(amount);
+
+        // Update product_returns
+        await connection.query(
+            'UPDATE product_returns SET product_name = ?, amount = ? WHERE id = ?',
+            [product_name, newAmount, id]
+        );
+
+        // Locate corresponding transaction in shop_transactions
+        // Matches type='Return', shop_id, and date, using a flexible query matching amount or description
+        const [txs] = await connection.query(`
+            SELECT id FROM shop_transactions
+            WHERE shop_id = ? AND type = 'Return'
+              AND DATE(transaction_date) = ?
+              AND (amount = ? OR description LIKE ?)
+            LIMIT 1
+        `, [ret.shop_id, ret.return_date, oldAmount, `%${ret.product_name}%`]);
+
+        if (txs.length > 0) {
+            const txId = txs[0].id;
+            await connection.query(
+                `UPDATE shop_transactions 
+                 SET amount = ?, description = ? 
+                 WHERE id = ?`,
+                [newAmount, `Product Return: ${product_name} (₹${newAmount})`, txId]
+            );
+        }
+
+        // Ripple calculation starting from the return date
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [ret.return_date]);
+        const txDate = dateRows[0].tx_date;
+
+        await financialService.rebuildRipple(connection, ret.shop_id, txDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: 'Product return updated successfully' });
+    } catch (err) {
+        await connection.rollback();
+        console.error('editProductReturn error:', err);
+        res.status(500).json({ error: err.message || 'Failed to update product return' });
+    } finally {
+        connection.release();
+    }
+};
+
+/**
+ * DELETE /api/collections/returns/:id
+ * Admin-only: deletes an individual product return entry.
+ */
+exports.deleteProductReturn = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { id } = req.params;
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve existing return row
+        const [returns] = await connection.query(
+            'SELECT shop_id, product_name, amount, return_date FROM product_returns WHERE id = ? FOR UPDATE',
+            [id]
+        );
+        if (returns.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Product return entry not found' });
+        }
+        const ret = returns[0];
+        const oldAmount = parseFloat(ret.amount);
+
+        // Delete from product_returns
+        await connection.query('DELETE FROM product_returns WHERE id = ?', [id]);
+
+        // Locate and delete corresponding transaction in shop_transactions
+        const [txs] = await connection.query(`
+            SELECT id FROM shop_transactions
+            WHERE shop_id = ? AND type = 'Return'
+              AND DATE(transaction_date) = ?
+              AND (amount = ? OR description LIKE ?)
+            LIMIT 1
+        `, [ret.shop_id, ret.return_date, oldAmount, `%${ret.product_name}%`]);
+
+        if (txs.length > 0) {
+            await connection.query('DELETE FROM shop_transactions WHERE id = ?', [txs[0].id]);
+        }
+
+        // Ripple calculation
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [ret.return_date]);
+        const txDate = dateRows[0].tx_date;
+
+        await financialService.rebuildRipple(connection, ret.shop_id, txDate);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: 'Product return deleted successfully' });
+    } catch (err) {
+        await connection.rollback();
+        console.error('deleteProductReturn error:', err);
+        res.status(500).json({ error: err.message || 'Failed to delete product return' });
+    } finally {
+        connection.release();
+    }
+};
+
+/**
+ * POST /api/collections/transactions/add-retroactive
+ * Admin-only: directly records an approved retroactive payment, adjustment, or return.
+ */
+exports.addRetroactiveTransaction = async (req, res) => {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'Admin')) {
+        return res.status(403).json({ error: 'Access denied: Admin only' });
+    }
+    const { shopId, type, amount, paymentMode, description, date } = req.body;
+
+    if (!shopId || !type || amount === undefined || isNaN(parseFloat(amount)) || !date) {
+        return res.status(400).json({ error: 'shopId, type, valid numeric amount, and date are required' });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Retrieve shop
+        const [shops] = await connection.query(
+            'SELECT shop_name, village_name, order_line_id FROM shops WHERE id = ?',
+            [shopId]
+        );
+        if (shops.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Shop not found' });
+        }
+        const shop = shops[0];
+
+        const txType = type; // 'Payment' | 'Adjustment' | 'Return'
+        const txAmount = parseFloat(amount);
+        const txMode = (paymentMode || 'CASH').toUpperCase();
+        const txCategory = txType === 'Payment' ? 'PAYMENT' : (txType === 'Adjustment' ? 'MANUAL_ADJUST' : 'RETURN');
+        const txDesc = description || `${txType} Recorded`;
+
+        // Format transaction datetime combining target date with actual current time
+        const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+        const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS
+        const mysqlDate = `${date} ${currentISTTime}`;
+
+        // Insert Transaction in shop_transactions
+        await connection.query(`
+            INSERT INTO shop_transactions 
+                (shop_id, type, amount, payment_mode, payment_method, transaction_category, description, 
+                 balance_after, approval_status, affects_balance, created_by, transaction_date) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'APPROVED', 1, 'Admin', ?)
+        `, [shopId, txType, txAmount, txMode, txMode, txCategory, txDesc, mysqlDate]);
+
+        // If it is a Return, also insert into product_returns
+        if (txType === 'Return') {
+            const productName = description ? description.replace('Product Return: ', '') : 'Returned Product';
+            await connection.query(`
+                INSERT INTO product_returns (shop_id, product_name, amount, created_by, return_date)
+                VALUES (?, ?, ?, 'Admin', ?)
+            `, [shopId, productName, txAmount, date]);
+        }
+
+        // Ripple calculation starting from the target date
+        await financialService.rebuildRipple(connection, shopId, date);
+
+        await connection.commit();
+        cacheService.flush();
+
+        res.json({ message: `${txType} recorded retroactively successfully` });
+    } catch (err) {
+        await connection.rollback();
+        console.error('addRetroactiveTransaction error:', err);
+        res.status(500).json({ error: err.message || 'Failed to add retroactive transaction' });
+    } finally {
+        connection.release();
     }
 };

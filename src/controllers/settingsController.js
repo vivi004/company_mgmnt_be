@@ -244,10 +244,17 @@ exports.getDashboardBootstrap = async (req, res) => {
         await ensureShopsColumns();
 
         // Query settings, vehicles, unverified bills count, and verified bills count in parallel
-        const [settingsRows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1');
-        const [vehicleRows] = await db.query('SELECT * FROM motor_vehicles ORDER BY created_at DESC');
-        const [unverifiedRows] = await db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Unverified"');
-        const [verifiedRows] = await db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Verified"');
+        const [
+            [settingsRows],
+            [vehicleRows],
+            [unverifiedRows],
+            [verifiedRows]
+        ] = await Promise.all([
+            db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1'),
+            db.query('SELECT * FROM motor_vehicles ORDER BY created_at DESC'),
+            db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Unverified"'),
+            db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Verified"')
+        ]);
 
         res.json({
             invoiceSettings: settingsRows[0] || {},

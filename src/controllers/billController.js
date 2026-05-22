@@ -949,14 +949,14 @@ exports.getBillsByDateRange = async (req, res) => {
         const params = [];
 
         if (startDate) {
-            query += ' AND b.bill_date >= ?';
+            query += ' AND COALESCE(b.delivery_date, b.bill_date) >= ?';
             params.push(startDate);
         }
         if (endDate) {
             // Add 1 day to endDate to include the full end day
             const end = new Date(endDate);
             end.setDate(end.getDate() + 1);
-            query += ' AND b.bill_date < ?';
+            query += ' AND COALESCE(b.delivery_date, b.bill_date) < ?';
             params.push(end.toISOString().split('T')[0]);
         }
 

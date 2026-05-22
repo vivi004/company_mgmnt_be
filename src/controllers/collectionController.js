@@ -114,12 +114,43 @@ exports.getCollectionsByOrderLine = async (req, res) => {
                 COALESCE(pt.pending_json, '[]') AS pending_transactions,
 
                 -- The PREV BAL logic
-                COALESCE(dc.old_balance, COALESCE(prev.total_balance, COALESCE(sb.balance, 0))) AS old_balance,
+                COALESCE(
+                    dc.old_balance, 
+                    COALESCE(
+                        prev.total_balance, 
+                        COALESCE(
+                            (
+                                SELECT tx.balance_after 
+                                FROM shop_transactions tx 
+                                WHERE tx.shop_id = s.id 
+                                  AND tx.transaction_date < ? 
+                                  AND tx.approval_status = 'APPROVED'
+                                ORDER BY tx.transaction_date DESC, tx.id DESC 
+                                LIMIT 1
+                            ),
+                            COALESCE(sb.opening_balance, 0)
+                        )
+                    )
+                ) AS old_balance,
 
                 -- The TOTAL BAL logic
                 COALESCE(
                     dc.total_balance,
-                    COALESCE(prev.total_balance, COALESCE(sb.balance, 0)) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
+                    COALESCE(
+                        prev.total_balance, 
+                        COALESCE(
+                            (
+                                SELECT tx.balance_after 
+                                FROM shop_transactions tx 
+                                WHERE tx.shop_id = s.id 
+                                  AND tx.transaction_date < ? 
+                                  AND tx.approval_status = 'APPROVED'
+                                ORDER BY tx.transaction_date DESC, tx.id DESC 
+                                LIMIT 1
+                            ),
+                            COALESCE(sb.opening_balance, 0)
+                        )
+                    ) + COALESCE(dc.todays_bill_amount, 0) - (COALESCE(dc.cash_collected, 0) + COALESCE(dc.upi_collected, 0) + COALESCE(dc.cheque_collected, 0)) + COALESCE(dc.manual_adjustments, 0) - COALESCE(dc.return_amount, 0)
                 ) AS total_balance
             FROM shops s
             JOIN order_lines ol ON s.order_line_id = ol.id
@@ -167,7 +198,7 @@ exports.getCollectionsByOrderLine = async (req, res) => {
             ) pt ON s.id = pt.shop_id
             WHERE s.order_line_id = ?
             ORDER BY s.shop_name ASC
-        `, [date, date, date, date, date, date, date, olId]);
+        `, [date, date, date, date, date, date, date, date, date, olId]);
 
         // FETCH EXPENSES
         const [expRows] = await db.query(`

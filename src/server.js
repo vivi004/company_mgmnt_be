@@ -315,10 +315,35 @@ app.listen(PORT, async () => {
         console.log('Database tables verified/initialized.');
 
         // --- PERFORMANCE INDEXES AUTO-MIGRATION ---
+        const createIndexSafely = async (indexName, tableName, columnsSql) => {
+            try {
+                // Check if index exists in standard INFORMATION_SCHEMA
+                const [existing] = await db.query(`
+                    SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS 
+                    WHERE TABLE_SCHEMA = DATABASE() 
+                    AND TABLE_NAME = ? 
+                    AND INDEX_NAME = ? 
+                    LIMIT 1
+                `, [tableName, indexName]);
+                
+                if (!existing || existing.length === 0) {
+                    await db.query(`CREATE INDEX ${indexName} ON ${tableName}(${columnsSql})`);
+                    console.log(`Index '${indexName}' verified/created successfully.`);
+                }
+            } catch (err) {
+                // Ignore standard ER_DUP_KEYNAME (1061) duplicate index warning
+                if (err.errno === 1061 || err.code === 'ER_DUP_KEYNAME') {
+                    // Index already exists
+                } else {
+                    console.warn(`Warning creating performance index ${indexName}:`, err.message);
+                }
+            }
+        };
+
         try {
-            await db.query(`CREATE INDEX IF NOT EXISTS idx_product_returns_shop_date ON product_returns(shop_id, return_date)`);
-            await db.query(`CREATE INDEX IF NOT EXISTS idx_product_returns_date ON product_returns(return_date)`);
-            await db.query(`CREATE INDEX IF NOT EXISTS idx_shop_transactions_paginated ON shop_transactions(shop_id, transaction_date, id DESC)`);
+            await createIndexSafely('idx_product_returns_shop_date', 'product_returns', 'shop_id, return_date');
+            await createIndexSafely('idx_product_returns_date', 'product_returns', 'return_date');
+            await createIndexSafely('idx_shop_transactions_paginated', 'shop_transactions', 'shop_id, transaction_date, id DESC');
             console.log('Performance indexes successfully verified/created.');
         } catch (e) {
             console.warn('Warning creating performance indexes:', e.message);

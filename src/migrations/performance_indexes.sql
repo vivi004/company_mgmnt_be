@@ -46,13 +46,13 @@ ON order_lines(name);
 
 -- 7. Product Returns Table Indexes
 -- Indexes for daily returns queries and shop-level returns analyses
-CREATE INDEX IF NOT EXISTS idx_product_returns_shop_date 
+CREATE INDEX idx_product_returns_shop_date 
 ON product_returns(shop_id, return_date);
 
-CREATE INDEX IF NOT EXISTS idx_product_returns_date 
+CREATE INDEX idx_product_returns_date 
 ON product_returns(return_date);
 
 -- 8. Shop Transactions Paginated Index
 -- Composite index for paginated sequential ledger queries
-CREATE INDEX IF NOT EXISTS idx_shop_transactions_paginated 
+CREATE INDEX idx_shop_transactions_paginated 
 ON shop_transactions(shop_id, transaction_date, id DESC);

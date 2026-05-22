@@ -17,7 +17,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
     // 1. Get the starting balance before this date
     const [prevTx] = await connection.query(
         `SELECT balance_after FROM shop_transactions 
-         WHERE shop_id = ? AND transaction_date < ? 
+         WHERE shop_id = ? AND transaction_date < ? AND approval_status = 'APPROVED'
          ORDER BY transaction_date DESC, id DESC LIMIT 1`,
         [shopId, targetDate]
     );
@@ -37,7 +37,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
     // 2. Fetch all transactions from targetDate onwards
     const [transactions] = await connection.query(
-        `SELECT id, amount, type, payment_mode, transaction_date 
+        `SELECT id, amount, type, payment_mode, transaction_date, approval_status 
          FROM shop_transactions 
          WHERE shop_id = ? AND transaction_date >= ? 
          ORDER BY transaction_date ASC, id ASC`,
@@ -53,40 +53,42 @@ async function rebuildRipple(connection, shopId, targetDate) {
         const mode = (tx.payment_mode || '').toUpperCase();
         const dateStr = toISTDate(tx.transaction_date);
 
-        if (type === 'Bill') {
-            runningBalance += amount;
-        } else if (type === 'Payment') {
-            runningBalance -= amount;
-        } else if (type === 'Adjustment') {
-            runningBalance += amount; 
-        } else if (type === 'Return') {
-            runningBalance -= amount;
+        if (tx.approval_status === 'APPROVED') {
+            if (type === 'Bill') {
+                runningBalance += amount;
+            } else if (type === 'Payment') {
+                runningBalance -= amount;
+            } else if (type === 'Adjustment') {
+                runningBalance += amount; 
+            } else if (type === 'Return') {
+                runningBalance -= amount;
+            }
+
+            if (!dailyAggregates[dateStr]) {
+                dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
+            }
+            
+            if (type === 'Bill') {
+                dailyAggregates[dateStr].bill += amount;
+            } else if (type === 'Payment') {
+                if (mode.includes('UPI') || mode.includes('GPAY') || mode.includes('PHONEPE') || mode.includes('PAYTM')) {
+                    dailyAggregates[dateStr].upi += amount;
+                } else if (mode.includes('CHEQUE') || mode.includes('CHECK')) {
+                    dailyAggregates[dateStr].cheque += amount;
+                } else if (mode === 'DISCOUNT') {
+                    dailyAggregates[dateStr].adj -= amount; 
+                } else {
+                    dailyAggregates[dateStr].cash += amount;
+                }
+            } else if (type === 'Adjustment') {
+                dailyAggregates[dateStr].adj += amount;
+            } else if (type === 'Return') {
+                dailyAggregates[dateStr].returns += amount;
+            }
         }
 
         // Store new balance in-memory to update later in batch
         tx.new_balance_after = runningBalance;
-
-        if (!dailyAggregates[dateStr]) {
-            dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
-        }
-        
-        if (type === 'Bill') {
-            dailyAggregates[dateStr].bill += amount;
-        } else if (type === 'Payment') {
-            if (mode.includes('UPI') || mode.includes('GPAY') || mode.includes('PHONEPE') || mode.includes('PAYTM')) {
-                dailyAggregates[dateStr].upi += amount;
-            } else if (mode.includes('CHEQUE') || mode.includes('CHECK')) {
-                dailyAggregates[dateStr].cheque += amount;
-            } else if (mode === 'DISCOUNT') {
-                dailyAggregates[dateStr].adj -= amount; 
-            } else {
-                dailyAggregates[dateStr].cash += amount;
-            }
-        } else if (type === 'Adjustment') {
-            dailyAggregates[dateStr].adj += amount;
-        } else if (type === 'Return') {
-            dailyAggregates[dateStr].returns += amount;
-        }
     }
 
     // HIGH-PERFORMANCE BATCH UPDATE 1: shop_transactions

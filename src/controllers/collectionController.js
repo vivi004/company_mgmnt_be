@@ -400,7 +400,7 @@ exports.editPaymentTransaction = async (req, res) => {
 
         // Retrieve existing transaction
         const [txs] = await connection.query(
-            'SELECT shop_id, type, amount, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
+            'SELECT shop_id, type, amount, payment_mode, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
             [id]
         );
         if (txs.length === 0) {
@@ -433,6 +433,48 @@ exports.editPaymentTransaction = async (req, res) => {
         await connection.commit();
         cacheService.flush();
 
+        // Push to Google Sheets Webhook
+        try {
+            const [shops] = await db.query(
+                'SELECT shop_name, village_name, owner_name FROM shops WHERE id = ?',
+                [tx.shop_id]
+            );
+            const shop = shops[0] || {};
+
+            // 1. Push Reversal for the old transaction (payments are sent negative, so reversal is +oldAmount)
+            const oldAmount = parseFloat(tx.amount);
+            await webhookService.sendTransactionToWebhook({
+                shop_id: tx.shop_id,
+                shop_name: shop.shop_name || 'Unknown',
+                village_name: shop.village_name || '',
+                specific_area: shop.owner_name || '',
+                type: 'Payment',
+                amount: oldAmount,
+                payment_method: tx.payment_mode || 'N/A',
+                description: `REVERSED (EDITED): ${tx.description}`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+
+            // 2. Push the New updated transaction details
+            await webhookService.sendTransactionToWebhook({
+                shop_id: tx.shop_id,
+                shop_name: shop.shop_name || 'Unknown',
+                village_name: shop.village_name || '',
+                specific_area: shop.owner_name || '',
+                type: 'Payment',
+                amount: -newAmount,
+                payment_method: newMode,
+                description: `${newDesc} (EDITED)`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+        } catch (webhookErr) {
+            console.error('Failed to send edit payment webhooks:', webhookErr);
+        }
+
         res.json({ message: 'Payment transaction updated successfully' });
     } catch (err) {
         await connection.rollback();
@@ -464,7 +506,7 @@ exports.editAdjustmentTransaction = async (req, res) => {
 
         // Retrieve existing transaction
         const [txs] = await connection.query(
-            'SELECT shop_id, type, transaction_date FROM shop_transactions WHERE id = ? FOR UPDATE',
+            'SELECT shop_id, type, amount, payment_mode, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
             [id]
         );
         if (txs.length === 0) {
@@ -497,6 +539,48 @@ exports.editAdjustmentTransaction = async (req, res) => {
         await connection.commit();
         cacheService.flush();
 
+        // Push to Google Sheets Webhook
+        try {
+            const [shops] = await db.query(
+                'SELECT shop_name, village_name, owner_name FROM shops WHERE id = ?',
+                [tx.shop_id]
+            );
+            const shop = shops[0] || {};
+
+            // 1. Push Reversal for the old transaction (adjustments are sent positive/negative as is, so reversal is -oldAmount)
+            const oldAmount = parseFloat(tx.amount);
+            await webhookService.sendTransactionToWebhook({
+                shop_id: tx.shop_id,
+                shop_name: shop.shop_name || 'Unknown',
+                village_name: shop.village_name || '',
+                specific_area: shop.owner_name || '',
+                type: 'Adjustment',
+                amount: -oldAmount,
+                payment_method: tx.payment_mode || 'N/A',
+                description: `REVERSED (EDITED): ${tx.description}`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+
+            // 2. Push the New updated transaction details
+            await webhookService.sendTransactionToWebhook({
+                shop_id: tx.shop_id,
+                shop_name: shop.shop_name || 'Unknown',
+                village_name: shop.village_name || '',
+                specific_area: shop.owner_name || '',
+                type: 'Adjustment',
+                amount: newAmount,
+                payment_method: newMode,
+                description: `${newDesc} (EDITED)`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+        } catch (webhookErr) {
+            console.error('Failed to send edit adjustment webhooks:', webhookErr);
+        }
+
         res.json({ message: 'Adjustment transaction updated successfully' });
     } catch (err) {
         await connection.rollback();
@@ -523,7 +607,7 @@ exports.deleteTransaction = async (req, res) => {
 
         // Retrieve existing transaction
         const [txs] = await connection.query(
-            'SELECT shop_id, type, amount, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
+            'SELECT shop_id, type, amount, payment_mode, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
             [id]
         );
         if (txs.length === 0) {
@@ -555,6 +639,35 @@ exports.deleteTransaction = async (req, res) => {
 
         await connection.commit();
         cacheService.flush();
+
+        // Push Reversal to Google Sheets Webhook
+        try {
+            const [shops] = await db.query(
+                'SELECT shop_name, village_name, owner_name FROM shops WHERE id = ?',
+                [tx.shop_id]
+            );
+            const shop = shops[0] || {};
+
+            // Payments are sent negative, so reversal is +amount. Others (Adjustments/Returns) are reversed with opposite sign.
+            const originalAmount = parseFloat(tx.amount);
+            const reversalAmount = tx.type === 'Payment' ? originalAmount : -originalAmount;
+
+            await webhookService.sendTransactionToWebhook({
+                shop_id: tx.shop_id,
+                shop_name: shop.shop_name || 'Unknown',
+                village_name: shop.village_name || '',
+                specific_area: shop.owner_name || '',
+                type: tx.type,
+                amount: reversalAmount,
+                payment_method: tx.payment_mode || 'N/A',
+                description: `REVERSED / DELETED: ${tx.description} (DELETED)`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+        } catch (webhookErr) {
+            console.error('Failed to send delete transaction webhook:', webhookErr);
+        }
 
         res.json({ message: 'Transaction deleted successfully' });
     } catch (err) {
@@ -727,7 +840,7 @@ exports.addRetroactiveTransaction = async (req, res) => {
 
         // Retrieve shop
         const [shops] = await connection.query(
-            'SELECT shop_name, village_name, order_line_id FROM shops WHERE id = ?',
+            'SELECT shop_name, village_name, owner_name, order_line_id FROM shops WHERE id = ?',
             [shopId]
         );
         if (shops.length === 0) {
@@ -769,6 +882,25 @@ exports.addRetroactiveTransaction = async (req, res) => {
 
         await connection.commit();
         cacheService.flush();
+
+        // Push to Webhook
+        try {
+            await webhookService.sendTransactionToWebhook({
+                shop_id: shopId,
+                shop_name: shop.shop_name,
+                village_name: shop.village_name,
+                specific_area: shop.owner_name || '',
+                type: txType,
+                amount: txType === 'Payment' ? -txAmount : txAmount,
+                payment_method: txMode,
+                description: `${txDesc} (APPROVED)`,
+                balance_before: 0,
+                balance_after: 0,
+                created_by: 'Admin'
+            });
+        } catch (webhookErr) {
+            console.error('Failed to send retroactive transaction webhook:', webhookErr);
+        }
 
         res.json({ message: `${txType} recorded retroactively successfully` });
     } catch (err) {

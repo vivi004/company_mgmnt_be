@@ -413,6 +413,13 @@ exports.editPaymentTransaction = async (req, res) => {
             return res.status(400).json({ error: 'Transaction is not a payment type' });
         }
 
+        // Fetch balance before update
+        const [balBeforeRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [tx.shop_id]
+        );
+        const currentBalance = balBeforeRows.length > 0 ? parseFloat(balBeforeRows[0].balance) : 0;
+
         const newAmount = parseFloat(amount);
         const newMode = (payment_mode || 'CASH').toUpperCase();
         const newDesc = description || `Payment Received (${newMode})`;
@@ -441,8 +448,13 @@ exports.editPaymentTransaction = async (req, res) => {
             );
             const shop = shops[0] || {};
 
-            // 1. Push Reversal for the old transaction (payments are sent negative, so reversal is +oldAmount)
             const oldAmount = parseFloat(tx.amount);
+            const revBalanceBefore = currentBalance;
+            const revBalanceAfter = currentBalance + oldAmount;
+            const updBalanceBefore = revBalanceAfter;
+            const updBalanceAfter = revBalanceAfter - newAmount;
+
+            // 1. Push Reversal for the old transaction (payments are sent negative, so reversal is +oldAmount)
             await webhookService.sendTransactionToWebhook({
                 shop_id: tx.shop_id,
                 shop_name: shop.shop_name || 'Unknown',
@@ -452,8 +464,8 @@ exports.editPaymentTransaction = async (req, res) => {
                 amount: oldAmount,
                 payment_method: tx.payment_mode || 'N/A',
                 description: `REVERSED (EDITED): ${tx.description}`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: revBalanceBefore,
+                balance_after: revBalanceAfter,
                 created_by: 'Admin'
             });
 
@@ -467,8 +479,8 @@ exports.editPaymentTransaction = async (req, res) => {
                 amount: -newAmount,
                 payment_method: newMode,
                 description: `${newDesc} (EDITED)`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: updBalanceBefore,
+                balance_after: updBalanceAfter,
                 created_by: 'Admin'
             });
         } catch (webhookErr) {
@@ -519,6 +531,13 @@ exports.editAdjustmentTransaction = async (req, res) => {
             return res.status(400).json({ error: 'Transaction is not an adjustment' });
         }
 
+        // Fetch balance before update
+        const [balBeforeRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [tx.shop_id]
+        );
+        const currentBalance = balBeforeRows.length > 0 ? parseFloat(balBeforeRows[0].balance) : 0;
+
         const newAmount = parseFloat(amount);
         const newMode = (payment_mode || 'CASH').toUpperCase();
         const newDesc = description || 'Manual Adjustment';
@@ -547,8 +566,13 @@ exports.editAdjustmentTransaction = async (req, res) => {
             );
             const shop = shops[0] || {};
 
-            // 1. Push Reversal for the old transaction (adjustments are sent positive/negative as is, so reversal is -oldAmount)
             const oldAmount = parseFloat(tx.amount);
+            const revBalanceBefore = currentBalance;
+            const revBalanceAfter = currentBalance - oldAmount;
+            const updBalanceBefore = revBalanceAfter;
+            const updBalanceAfter = revBalanceAfter + newAmount;
+
+            // 1. Push Reversal for the old transaction (adjustments are sent positive/negative as is, so reversal is -oldAmount)
             await webhookService.sendTransactionToWebhook({
                 shop_id: tx.shop_id,
                 shop_name: shop.shop_name || 'Unknown',
@@ -558,8 +582,8 @@ exports.editAdjustmentTransaction = async (req, res) => {
                 amount: -oldAmount,
                 payment_method: tx.payment_mode || 'N/A',
                 description: `REVERSED (EDITED): ${tx.description}`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: revBalanceBefore,
+                balance_after: revBalanceAfter,
                 created_by: 'Admin'
             });
 
@@ -573,8 +597,8 @@ exports.editAdjustmentTransaction = async (req, res) => {
                 amount: newAmount,
                 payment_method: newMode,
                 description: `${newDesc} (EDITED)`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: updBalanceBefore,
+                balance_after: updBalanceAfter,
                 created_by: 'Admin'
             });
         } catch (webhookErr) {
@@ -616,6 +640,13 @@ exports.deleteTransaction = async (req, res) => {
         }
         const tx = txs[0];
 
+        // Fetch balance before deletion
+        const [balBeforeRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [tx.shop_id]
+        );
+        const balanceBefore = balBeforeRows.length > 0 ? parseFloat(balBeforeRows[0].balance) : 0;
+
         // Format date to YYYY-MM-DD
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [tx.transaction_date]);
         const txDate = dateRows[0].tx_date;
@@ -636,6 +667,13 @@ exports.deleteTransaction = async (req, res) => {
 
         // Perform balance re-ripple to update daily_collections and shop_balances
         await financialService.rebuildRipple(connection, tx.shop_id, txDate);
+
+        // Fetch balance after ripple
+        const [balAfterRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [tx.shop_id]
+        );
+        const balanceAfter = balAfterRows.length > 0 ? parseFloat(balAfterRows[0].balance) : 0;
 
         await connection.commit();
         cacheService.flush();
@@ -661,8 +699,8 @@ exports.deleteTransaction = async (req, res) => {
                 amount: reversalAmount,
                 payment_method: tx.payment_mode || 'N/A',
                 description: `REVERSED / DELETED: ${tx.description} (DELETED)`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: balanceBefore,
+                balance_after: balanceAfter,
                 created_by: 'Admin'
             });
         } catch (webhookErr) {
@@ -860,6 +898,13 @@ exports.addRetroactiveTransaction = async (req, res) => {
         const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS
         const mysqlDate = `${date} ${currentISTTime}`;
 
+        // Retrieve current balance before inserting/rippling
+        const [balBeforeRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [shopId]
+        );
+        const balanceBefore = balBeforeRows.length > 0 ? parseFloat(balBeforeRows[0].balance) : 0;
+
         // Insert Transaction in shop_transactions
         await connection.query(`
             INSERT INTO shop_transactions 
@@ -880,6 +925,13 @@ exports.addRetroactiveTransaction = async (req, res) => {
         // Ripple calculation starting from the target date
         await financialService.rebuildRipple(connection, shopId, date);
 
+        // Fetch balance after ripple
+        const [balAfterRows] = await connection.query(
+            'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
+            [shopId]
+        );
+        const balanceAfter = balAfterRows.length > 0 ? parseFloat(balAfterRows[0].balance) : 0;
+
         await connection.commit();
         cacheService.flush();
 
@@ -894,8 +946,8 @@ exports.addRetroactiveTransaction = async (req, res) => {
                 amount: txType === 'Payment' ? -txAmount : txAmount,
                 payment_method: txMode,
                 description: `${txDesc} (APPROVED)`,
-                balance_before: 0,
-                balance_after: 0,
+                balance_before: balanceBefore,
+                balance_after: balanceAfter,
                 created_by: 'Admin'
             });
         } catch (webhookErr) {

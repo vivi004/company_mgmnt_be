@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
 const shopController = require('../controllers/shopController');
+const approvalController = require('../controllers/approvalController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const shopValidation = [
@@ -27,6 +28,8 @@ router.post('/:id/product-return', authMiddleware, shopController.recordProductR
 router.post('/sync-all-to-ledger', authMiddleware, shopController.syncAllShopsToLedger);
 
 // Approval Workflow
+router.get('/transactions/pending', authMiddleware, approvalController.getPendingTransactions);
+router.post('/transactions/approve-bulk', authMiddleware, approvalController.approveTransactionsBulk);
 router.post('/transactions/:tx_id/approve', authMiddleware, shopController.approveTransaction);
 router.post('/transactions/:tx_id/reject', authMiddleware, shopController.rejectTransaction);
 

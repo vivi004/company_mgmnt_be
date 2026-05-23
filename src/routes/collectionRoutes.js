@@ -30,4 +30,8 @@ router.put('/returns/:id', authMiddleware, collectionController.editProductRetur
 router.delete('/returns/:id', authMiddleware, collectionController.deleteProductReturn);
 router.post('/transactions/add-retroactive', authMiddleware, collectionController.addRetroactiveTransaction);
 
+// Daily physical cash tally routes
+router.get('/tally', authMiddleware, collectionController.getDailyTally);
+router.post('/tally', authMiddleware, collectionController.saveDailyTally);
+
 module.exports = router;

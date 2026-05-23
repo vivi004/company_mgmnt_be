@@ -263,6 +263,17 @@ app.listen(PORT, async () => {
             )
         `);
 
+        // Ensure daily_tally table exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS daily_tally (
+                collection_date DATE PRIMARY KEY,
+                physical_cash DECIMAL(12, 2) DEFAULT NULL,
+                variance DECIMAL(12, 2) DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
         // Alter shop_transactions ENUM to include 'Return'
         try {
             await db.query(`

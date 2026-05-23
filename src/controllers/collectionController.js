@@ -779,3 +779,57 @@ exports.addRetroactiveTransaction = async (req, res) => {
         connection.release();
     }
 };
+
+/**
+ * GET /api/collections/tally?date=YYYY-MM-DD
+ * Returns the physical cash tally record for the given date.
+ */
+exports.getDailyTally = async (req, res) => {
+    const { date } = req.query;
+    if (!date) {
+        return res.status(400).json({ error: 'date query parameter is required (YYYY-MM-DD)' });
+    }
+
+    try {
+        const [rows] = await db.query(
+            'SELECT physical_cash, variance FROM daily_tally WHERE collection_date = ?',
+            [date]
+        );
+        if (rows.length > 0) {
+            res.json({ physical_cash: rows[0].physical_cash, variance: rows[0].variance });
+        } else {
+            res.json({ physical_cash: null, variance: null });
+        }
+    } catch (err) {
+        console.error('getDailyTally error:', err);
+        res.status(500).json({ error: 'Failed to fetch cash tally record' });
+    }
+};
+
+/**
+ * POST /api/collections/tally
+ * Creates or updates the physical cash tally record for a date.
+ */
+exports.saveDailyTally = async (req, res) => {
+    const { date, physical_cash, variance } = req.body;
+    if (!date) {
+        return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
+    }
+
+    // Support resetting (null values)
+    const cashAmount = physical_cash !== null && physical_cash !== undefined ? parseFloat(physical_cash) : null;
+    const varianceAmount = variance !== null && variance !== undefined ? parseFloat(variance) : null;
+
+    try {
+        await db.query(`
+            INSERT INTO daily_tally (collection_date, physical_cash, variance)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE physical_cash = VALUES(physical_cash), variance = VALUES(variance)
+        `, [date, cashAmount, varianceAmount]);
+
+        res.json({ message: 'Cash tally successfully saved' });
+    } catch (err) {
+        console.error('saveDailyTally error:', err);
+        res.status(500).json({ error: 'Failed to save cash tally record' });
+    }
+};

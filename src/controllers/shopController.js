@@ -85,11 +85,42 @@ const createShop = async (req, res) => {
         );
         const shopId = result.insertId;
 
-        // 2. Insert into shop_balances
+        // 2. Insert into shop_balances (opening_balance is set to 0 because it's represented as a transaction)
         await connection.query(
-            'INSERT INTO shop_balances (shop_id, balance, opening_balance) VALUES (?, ?, ?)',
-            [shopId, startBalance, startBalance]
+            'INSERT INTO shop_balances (shop_id, balance, opening_balance) VALUES (?, ?, 0)',
+            [shopId, startBalance]
         );
+
+        // 3. Insert transaction into shop_transactions if startBalance > 0
+        if (startBalance > 0) {
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' '); // IST timestamp
+            
+            await connection.query(
+                `INSERT INTO shop_transactions 
+                    (shop_id, type, amount, description, balance_after, approval_status, affects_balance, created_by, transaction_date, transaction_category, payment_mode) 
+                 VALUES (?, 'Adjustment', ?, 'Shop Registered (Opening Balance)', ?, 'APPROVED', TRUE, ?, ?, 'MANUAL_ADJUST', 'CASH')`,
+                [shopId, startBalance, startBalance, created_by || 'System', mysqlDate]
+            );
+
+            // Fetch the formatted date as YYYY-MM-DD
+            const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [mysqlDate]);
+            const txDate = dateRows[0].tx_date;
+
+            // Update daily_collections for the shop on its registration day
+            await connection.query(`
+                INSERT INTO daily_collections
+                    (shop_id, shop_name, village_name, order_line_id, collection_date,
+                     manual_adjustments, old_balance, total_balance)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                ON DUPLICATE KEY UPDATE
+                    manual_adjustments = manual_adjustments + VALUES(manual_adjustments),
+                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+            `, [shopId, shop_name, village_name || '', order_line_id, txDate, startBalance, startBalance]);
+
+            // Rebuild the balance ripple sequentially
+            await financialService.rebuildRipple(connection, shopId, txDate);
+        }
 
         await connection.commit();
         cacheService.flush();

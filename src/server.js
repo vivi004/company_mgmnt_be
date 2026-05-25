@@ -89,6 +89,7 @@ const settingsRoutes = require('./routes/settingsRoutes');
 const billRoutes = require('./routes/billRoutes');
 const productRoutes = require('./routes/productRoutes');
 const collectionRoutes = require('./routes/collectionRoutes');
+const shopLinksRoutes = require('./routes/shopLinksRoutes');
 const { startScheduler } = require('./services/schedulerService');
 
 app.use('/api/employees', employeeRoutes);
@@ -101,6 +102,7 @@ app.use('/api/bills', billRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/collections', collectionRoutes);
+app.use('/api/shop-links', shopLinksRoutes);
 
 // 4. Uptime Monitoring Health Check Probe Endpoint (Lightweight & Safe)
 const db = require('./config/db');
@@ -271,6 +273,21 @@ app.listen(PORT, async () => {
                 variance DECIMAL(12, 2) DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Ensure shop_links table exists
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS shop_links (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                primary_shop_id INT NOT NULL,
+                linked_shop_id INT NOT NULL,
+                linked_by VARCHAR(100),
+                linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                note VARCHAR(255) DEFAULT '',
+                UNIQUE KEY uq_linked_shop (linked_shop_id),
+                FOREIGN KEY (primary_shop_id) REFERENCES shops(id) ON DELETE CASCADE,
+                FOREIGN KEY (linked_shop_id) REFERENCES shops(id) ON DELETE CASCADE
             )
         `);
 

@@ -235,6 +235,9 @@ const updateShop = async (req, res) => {
                     total_balance = VALUES(total_balance)
             `, [id, shop_name, village_name || '', oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
 
+            // Recalculate daily collections balance ripple
+            await financialService.rebuildRipple(connection, id, todayIST);
+
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
                 shop_name: shop_name,

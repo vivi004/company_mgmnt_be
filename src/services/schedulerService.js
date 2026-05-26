@@ -47,6 +47,7 @@ async function applyDueBills() {
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE DATE(CONVERT_TZ(b.delivery_date, '+00:00', '+05:30')) = ?
               AND b.is_applied_to_balance = 0
+              AND b.status = 'Verified'
             FOR UPDATE
         `, [todayIST]);
 

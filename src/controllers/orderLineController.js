@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const financialService = require('../services/financialService');
 
 exports.getAllOrderLines = async (req, res) => {
     try {
@@ -87,6 +88,17 @@ exports.approveDeleteRequest = async (req, res) => {
         const connection = await db.getConnection();
         try {
             await connection.beginTransaction();
+
+            // 0. Find all external shop IDs whose balances are affected by deleting shops on this route
+            const [affectedShops] = await connection.query(`
+                SELECT DISTINCT parent_shop_id as id FROM shops 
+                WHERE order_line_id = ? AND parent_shop_id IS NOT NULL
+                  AND parent_shop_id NOT IN (SELECT id FROM shops WHERE order_line_id = ?)
+                UNION
+                SELECT id FROM shops 
+                WHERE parent_shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)
+                  AND order_line_id != ?
+            `, [request.order_line_id, request.order_line_id, request.order_line_id, request.order_line_id]);
             
             // 1. Delete transactions for all shops in this village
             await connection.query('DELETE FROM shop_transactions WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
@@ -105,6 +117,15 @@ exports.approveDeleteRequest = async (req, res) => {
             
             // Update approved request status
             await connection.query('UPDATE order_line_requests SET status = "Approved" WHERE id = ?', [id]);
+
+            // 5. Rebuild ripples for any affected external shops to recalculate their balances
+            if (affectedShops.length > 0) {
+                const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+                const todayIST = dateRows[0].today;
+                for (const row of affectedShops) {
+                    await financialService.rebuildRipple(connection, row.id, todayIST);
+                }
+            }
             
             await connection.commit();
         } catch (err) {
@@ -192,6 +213,17 @@ exports.deleteOrderLine = async (req, res) => {
         const connection = await db.getConnection();
         try {
             await connection.beginTransaction();
+
+            // 0. Find all external shop IDs whose balances are affected by deleting shops on this route
+            const [affectedShops] = await connection.query(`
+                SELECT DISTINCT parent_shop_id as id FROM shops 
+                WHERE order_line_id = ? AND parent_shop_id IS NOT NULL
+                  AND parent_shop_id NOT IN (SELECT id FROM shops WHERE order_line_id = ?)
+                UNION
+                SELECT id FROM shops 
+                WHERE parent_shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)
+                  AND order_line_id != ?
+            `, [id, id, id, id]);
             
             // Clean up related requests first
             await connection.query(
@@ -213,6 +245,15 @@ exports.deleteOrderLine = async (req, res) => {
             
             // 4. Delete the order line itself
             await connection.query('DELETE FROM order_lines WHERE id = ?', [id]);
+
+            // 5. Rebuild ripples for any affected external shops to recalculate their balances
+            if (affectedShops.length > 0) {
+                const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+                const todayIST = dateRows[0].today;
+                for (const row of affectedShops) {
+                    await financialService.rebuildRipple(connection, row.id, todayIST);
+                }
+            }
             
             await connection.commit();
         } catch (err) {

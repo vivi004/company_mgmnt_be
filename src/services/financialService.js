@@ -33,9 +33,9 @@ async function rebuildRipple(connection, shopId, targetDate) {
         shopDetailsMap[row.id] = row;
     }
 
-    // 1. Get the group's earliest registration date and sum of opening balances
+    // 1. Get the group's earliest registration date and max of opening balances
     const [shopInfo] = await connection.query(
-        'SELECT COALESCE(SUM(sb.opening_balance), 0) as opening_balance, MIN(DATE(s.created_at)) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id IN (?)',
+        'SELECT COALESCE(MAX(sb.opening_balance), 0) as opening_balance, MIN(DATE(s.created_at)) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id IN (?)',
         [linkedShopIds]
     );
     const createdDateStr = shopInfo.length > 0 ? toISTDate(shopInfo[0].created_date) : '2000-01-01';

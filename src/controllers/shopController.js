@@ -120,6 +120,13 @@ const createShop = async (req, res) => {
 
             // Rebuild the balance ripple sequentially
             await financialService.rebuildRipple(connection, shopId, txDate);
+        } else if (parent_shop_id) {
+            // Trigger ripple for new child shop to inherit the parent group balance
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const mysqlDate = istNow.toISOString().slice(0, 19).replace('T', ' '); // IST timestamp
+            const [dateRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [mysqlDate]);
+            const txDate = dateRows[0].tx_date;
+            await financialService.rebuildRipple(connection, shopId, txDate);
         }
 
         await connection.commit();
@@ -297,6 +304,9 @@ const deleteShop = async (req, res) => {
         
         const shop = shops[0];
 
+        // Fetch all child shops linked to this parent shop so we can repair their balances after deletion
+        const [children] = await connection.query('SELECT id FROM shops WHERE parent_shop_id = ?', [id]);
+
         // 2. Log deletion to Webhook (Background)
         let actingUserName = 'Admin';
         try {
@@ -328,6 +338,15 @@ const deleteShop = async (req, res) => {
 
         // 4. Finally delete the shop
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);
+
+        // 5. Rebuild ripples for any orphan child shops so their standalone balances are recalculated
+        if (children.length > 0) {
+            const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+            const todayIST = dateRows[0].today;
+            for (const child of children) {
+                await financialService.rebuildRipple(connection, child.id, todayIST);
+            }
+        }
 
         await connection.commit();
         cacheService.flush();

@@ -176,15 +176,31 @@ async function pruneOldLedgerTransactions() {
         console.log(`[CRON] Found old transactions for ${lastOldTxs.length} shops to carry forward & prune.`);
 
         // 3. For each shop, update the opening_balance to be the balance_after of the latest pruned transaction
-        for (const tx of lastOldTxs) {
-            const shopId = tx.shop_id;
-            const newOpeningBal = parseFloat(tx.balance_after) || 0;
+        // Group-aware optimization: For linked shops, only carry forward the single latest transaction balance for the group to prevent double counting.
+        const [shops] = await connection.query('SELECT id, parent_shop_id FROM shops');
+        const shopToParentMap = {};
+        for (const s of shops) {
+            shopToParentMap[s.id] = s.parent_shop_id || s.id;
+        }
 
-            await connection.query(`
-                INSERT INTO shop_balances (shop_id, balance, opening_balance) 
-                VALUES (?, ?, ?) 
-                ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)
-            `, [shopId, newOpeningBal, newOpeningBal]);
+        const groupLatestTx = {};
+        for (const tx of lastOldTxs) {
+            const parentId = shopToParentMap[tx.shop_id] || tx.shop_id;
+            if (!groupLatestTx[parentId] || new Date(tx.transaction_date) > new Date(groupLatestTx[parentId].transaction_date)) {
+                groupLatestTx[parentId] = tx;
+            }
+        }
+
+        for (const parentId of Object.keys(groupLatestTx)) {
+            const newOpeningBal = parseFloat(groupLatestTx[parentId].balance_after) || 0;
+            const groupShopIds = shops.filter(s => (s.parent_shop_id || s.id) === parseInt(parentId)).map(s => s.id);
+            for (const shopId of groupShopIds) {
+                await connection.query(`
+                    INSERT INTO shop_balances (shop_id, balance, opening_balance) 
+                    VALUES (?, ?, ?) 
+                    ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)
+                `, [shopId, newOpeningBal, newOpeningBal]);
+            }
         }
 
         // 4. Delete all transactions older than the threshold

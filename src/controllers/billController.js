@@ -593,11 +593,16 @@ exports.deleteBill = async (req, res) => {
                 `, [amount, amount, shop.id, delDateStr]);
 
                 // Reduce today's future_bills column — total_balance is NOT affected
+                // Use INSERT ... ON DUPLICATE KEY UPDATE to guarantee the row exists
+                // (if no collection activity happened today yet, the UPDATE alone would silently do nothing)
                 await connection.query(`
-                    UPDATE daily_collections
-                    SET future_bills = GREATEST(0, future_bills - ?)
-                    WHERE shop_id = ? AND collection_date = ?
-                `, [amount, shop.id, todayStr]);
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         future_bills, old_balance, total_balance)
+                    VALUES (?, ?, ?, ?, ?, 0, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        future_bills = GREATEST(0, future_bills - ?)
+                `, [shop.id, bill.shop_name, bill.village_name, shop.order_line_id, todayStr, amount]);
             } else {
                 // Today's or past bill deleted: remove from its date row
                 await connection.query(`
@@ -970,7 +975,7 @@ exports.getBillsByDateRange = async (req, res) => {
             params.push(end.toISOString().split('T')[0]);
         }
 
-        query += ' GROUP BY b.id ORDER BY b.delivery_date DESC, b.id DESC LIMIT ? OFFSET ?';
+        query += ' ORDER BY b.delivery_date DESC, b.id DESC LIMIT ? OFFSET ?';
         params.push(limit, offset);
 
         const [rows] = await db.query(query, params);

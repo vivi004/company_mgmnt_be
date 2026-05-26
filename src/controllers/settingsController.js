@@ -35,17 +35,13 @@ const ensureSettings = async () => {
             await db.query("ALTER TABLE app_settings ADD COLUMN last_sheet_sync_time VARCHAR(100)");
         } catch (e) {}
     }
-    // Insert default row if not present
     await db.query(`
         INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)
         VALUES (1, 1001, 1000, 'https://docs.google.com/spreadsheets/d/1slf-BRcvxU6OzKYxnzGOFeJz38IGN--nnAw0gpXWLiI/edit?gid=0#gid=0')
     `);
-    // Also update it if it's currently empty to ensure the user's provided link is saved
-    await db.query(`
-        UPDATE app_settings 
-        SET ledger_sheet_url = 'https://docs.google.com/spreadsheets/d/1slf-BRcvxU6OzKYxnzGOFeJz38IGN--nnAw0gpXWLiI/edit?gid=0#gid=0' 
-        WHERE id = 1 AND (ledger_sheet_url IS NULL OR ledger_sheet_url = '')
-    `);
+    // NOTE: Removed the UPDATE that re-seeded ledger_sheet_url when empty.
+    // If Admin clears the URL, it should stay cleared. The INSERT IGNORE above
+    // only fires on first-time setup when the row doesn't exist at all.
 };
 
 // Ensure motor_vehicles table exists

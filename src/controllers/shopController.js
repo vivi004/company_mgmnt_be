@@ -335,6 +335,8 @@ const deleteShop = async (req, res) => {
         await connection.query('DELETE FROM shop_transactions WHERE shop_id = ?', [id]);
         await connection.query('DELETE FROM bills WHERE shop_id = ?', [id]);
         await connection.query('DELETE FROM shop_balances WHERE shop_id = ?', [id]);
+        await connection.query('DELETE FROM daily_collections WHERE shop_id = ?', [id]);
+        await connection.query('DELETE FROM product_returns WHERE shop_id = ?', [id]);
 
         // 4. Finally delete the shop
         await connection.query('DELETE FROM shops WHERE id = ?', [id]);

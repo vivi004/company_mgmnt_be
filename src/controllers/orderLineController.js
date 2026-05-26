@@ -109,6 +109,10 @@ exports.approveDeleteRequest = async (req, res) => {
             // 3. Delete balance records
             await connection.query('DELETE FROM shop_balances WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
 
+            // 3b. Delete daily collections and product returns for all shops in this village
+            await connection.query('DELETE FROM daily_collections WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
+            await connection.query('DELETE FROM product_returns WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [request.order_line_id]);
+
             // 4. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [request.order_line_id]);
             
@@ -239,6 +243,10 @@ exports.deleteOrderLine = async (req, res) => {
 
             // 3. Delete balance records
             await connection.query('DELETE FROM shop_balances WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
+
+            // 3b. Delete daily collections and product returns for all shops in this village
+            await connection.query('DELETE FROM daily_collections WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
+            await connection.query('DELETE FROM product_returns WHERE shop_id IN (SELECT id FROM shops WHERE order_line_id = ?)', [id]);
 
             // 4. Delete the shops
             await connection.query('DELETE FROM shops WHERE order_line_id = ?', [id]);

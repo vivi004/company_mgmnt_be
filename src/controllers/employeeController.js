@@ -38,6 +38,15 @@ exports.updateEmployee = async (req, res) => {
     const { id } = req.params;
     const { first_name, last_name, email, role, status, username, password, accessible_orderlines, profile_pic } = req.body;
     try {
+        if (req.user && parseInt(id, 10) === parseInt(req.user.id, 10)) {
+            if (role && role !== 'Admin') {
+                return res.status(400).json({ error: 'You cannot demote yourself from Admin role while logged in.' });
+            }
+            if (status && status !== 'Active') {
+                return res.status(400).json({ error: 'You cannot suspend your own account while logged in.' });
+            }
+        }
+
         // 1. Get the current name before update to handle cascading changes in bills/transactions
         const [oldRows] = await db.query('SELECT first_name, last_name FROM employees WHERE id = ?', [id]);
         let oldName = null;
@@ -91,6 +100,9 @@ exports.updateProfilePic = async (req, res) => {
 exports.deleteEmployee = async (req, res) => {
     const { id } = req.params;
     try {
+        if (req.user && parseInt(id, 10) === parseInt(req.user.id, 10)) {
+            return res.status(400).json({ error: 'You cannot delete your own account while logged in.' });
+        }
         await db.query('DELETE FROM employees WHERE id=?', [id]);
         res.json({ message: 'Employee deleted successfully' });
     } catch (err) {

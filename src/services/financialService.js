@@ -14,20 +14,32 @@ async function rebuildRipple(connection, shopId, targetDate) {
         return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     };
 
-    // 1. Get the shop's registration date and opening balance
+    // Find all shop IDs in the linked group
+    const [shopRows] = await connection.query('SELECT parent_shop_id FROM shops WHERE id = ?', [shopId]);
+    let linkedShopIds = [shopId];
+    if (shopRows.length > 0) {
+        const parentId = shopRows[0].parent_shop_id || shopId;
+        const [groupRows] = await connection.query('SELECT id FROM shops WHERE id = ? OR parent_shop_id = ?', [parentId, parentId]);
+        if (groupRows.length > 0) {
+            linkedShopIds = groupRows.map(r => r.id);
+        }
+    }
+    console.log(`[RIPPLE] Linked Shop IDs in group: ${linkedShopIds.join(', ')}`);
+
+    // 1. Get the group's earliest registration date and sum of opening balances
     const [shopInfo] = await connection.query(
-        'SELECT COALESCE(sb.opening_balance, 0) as opening_balance, DATE(s.created_at) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id = ?',
-        [shopId]
+        'SELECT COALESCE(SUM(sb.opening_balance), 0) as opening_balance, MIN(DATE(s.created_at)) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id IN (?)',
+        [linkedShopIds]
     );
     const createdDateStr = shopInfo.length > 0 ? toISTDate(shopInfo[0].created_date) : '2000-01-01';
     const openingBalance = shopInfo.length > 0 ? parseFloat(shopInfo[0].opening_balance) : 0;
 
-    // Get the starting balance before this date from approved transactions
+    // Get the starting balance before this date from approved transactions in the group
     const [prevTx] = await connection.query(
         `SELECT balance_after FROM shop_transactions 
-         WHERE shop_id = ? AND transaction_date < ? AND approval_status = 'APPROVED'
+         WHERE shop_id IN (?) AND transaction_date < ? AND approval_status = 'APPROVED'
          ORDER BY transaction_date DESC, id DESC LIMIT 1`,
-        [shopId, targetDate]
+        [linkedShopIds, targetDate]
     );
 
     let runningBalance = 0;
@@ -43,16 +55,21 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
     const initialBalance = runningBalance;
 
-    // 2. Fetch all transactions from targetDate onwards
+    // 2. Fetch all transactions from targetDate onwards for the group
     const [transactions] = await connection.query(
-        `SELECT id, amount, type, payment_mode, transaction_date, approval_status 
+        `SELECT id, shop_id, amount, type, payment_mode, transaction_date, approval_status 
          FROM shop_transactions 
-         WHERE shop_id = ? AND transaction_date >= ? 
+         WHERE shop_id IN (?) AND transaction_date >= ? 
          ORDER BY transaction_date ASC, id ASC`,
-         [shopId, targetDate]
+         [linkedShopIds, targetDate]
     );
 
+    // Initialize daily aggregates structure for each shop in the group
     const dailyAggregates = {}; 
+    for (const shopIdItem of linkedShopIds) {
+        dailyAggregates[shopIdItem] = {};
+    }
+
     let openingBalanceApplied = false;
     if (prevTx.length > 0 || toISTDate(targetDate) >= createdDateStr) {
         openingBalanceApplied = true;
@@ -64,6 +81,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
         const type = tx.type;
         const mode = (tx.payment_mode || '').toUpperCase();
         const dateStr = toISTDate(tx.transaction_date);
+        const txShopId = tx.shop_id;
 
         if (!openingBalanceApplied && dateStr >= createdDateStr) {
             runningBalance += openingBalance;
@@ -81,26 +99,26 @@ async function rebuildRipple(connection, shopId, targetDate) {
                 runningBalance -= amount;
             }
 
-            if (!dailyAggregates[dateStr]) {
-                dailyAggregates[dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
+            if (!dailyAggregates[txShopId][dateStr]) {
+                dailyAggregates[txShopId][dateStr] = { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
             }
             
             if (type === 'Bill') {
-                dailyAggregates[dateStr].bill += amount;
+                dailyAggregates[txShopId][dateStr].bill += amount;
             } else if (type === 'Payment') {
                 if (mode.includes('UPI') || mode.includes('GPAY') || mode.includes('PHONEPE') || mode.includes('PAYTM')) {
-                    dailyAggregates[dateStr].upi += amount;
+                    dailyAggregates[txShopId][dateStr].upi += amount;
                 } else if (mode.includes('CHEQUE') || mode.includes('CHECK')) {
-                    dailyAggregates[dateStr].cheque += amount;
+                    dailyAggregates[txShopId][dateStr].cheque += amount;
                 } else if (mode === 'DISCOUNT') {
-                    dailyAggregates[dateStr].adj -= amount; 
+                    dailyAggregates[txShopId][dateStr].adj -= amount; 
                 } else {
-                    dailyAggregates[dateStr].cash += amount;
+                    dailyAggregates[txShopId][dateStr].cash += amount;
                 }
             } else if (type === 'Adjustment') {
-                dailyAggregates[dateStr].adj += amount;
+                dailyAggregates[txShopId][dateStr].adj += amount;
             } else if (type === 'Return') {
-                dailyAggregates[dateStr].returns += amount;
+                dailyAggregates[txShopId][dateStr].returns += amount;
             }
         }
 
@@ -128,27 +146,27 @@ async function rebuildRipple(connection, shopId, targetDate) {
         console.log(`[RIPPLE] Batch updated ${transactions.length} shop transactions in 1 query.`);
     }
 
-    // 4. Fetch all future bills for this shop
+    // 4. Fetch all future bills for this group of shops
     const [futureBillRows] = await connection.query(
-        `SELECT total_amount, CONVERT_TZ(delivery_date, '+00:00', '+05:30') as del_date 
+        `SELECT shop_id, total_amount, CONVERT_TZ(delivery_date, '+00:00', '+05:30') as del_date 
          FROM bills 
-         WHERE shop_id = ? AND is_applied_to_balance = 0`,
-        [shopId]
+         WHERE shop_id IN (?) AND is_applied_to_balance = 0`,
+        [linkedShopIds]
     );
     
-    // 5. Fetch all future collection dates
+    // 5. Fetch all future collection dates for the group
     const [dates] = await connection.query(
         `SELECT DISTINCT collection_date FROM daily_collections 
-         WHERE shop_id = ? AND collection_date >= ? 
+         WHERE shop_id IN (?) AND collection_date >= ? 
          ORDER BY collection_date ASC`,
-        [shopId, targetDate]
+        [linkedShopIds, targetDate]
     );
 
     const [prevDay] = await connection.query(
         `SELECT total_balance FROM daily_collections 
-         WHERE shop_id = ? AND collection_date < ? 
+         WHERE shop_id IN (?) AND collection_date < ? 
          ORDER BY collection_date DESC LIMIT 1`,
-        [shopId, targetDate]
+        [linkedShopIds, targetDate]
     );
     
     let lastDayTotal = prevDay.length > 0 
@@ -172,63 +190,95 @@ async function rebuildRipple(connection, shopId, targetDate) {
             dcOpeningBalanceApplied = true;
         }
 
-        const agg = dailyAggregates[dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
-        
+        // 1. Calculate combined aggregates across all shops in the group for this date
+        let dayGroupBill = 0;
+        let dayGroupCash = 0;
+        let dayGroupUpi = 0;
+        let dayGroupCheque = 0;
+        let dayGroupAdj = 0;
+        let dayGroupReturns = 0;
+
+        for (const shopIdItem of linkedShopIds) {
+            const agg = dailyAggregates[shopIdItem][dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
+            dayGroupBill += agg.bill;
+            dayGroupCash += agg.cash;
+            dayGroupUpi += agg.upi;
+            dayGroupCheque += agg.cheque;
+            dayGroupAdj += agg.adj;
+            dayGroupReturns += agg.returns;
+        }
+
         const newOldBal = lastDayTotal;
-        const newTotalBal = newOldBal + agg.bill - (agg.cash + agg.upi + agg.cheque) + agg.adj - (agg.returns || 0);
+        const newTotalBal = newOldBal + dayGroupBill - (dayGroupCash + dayGroupUpi + dayGroupCheque) + dayGroupAdj - dayGroupReturns;
 
-        const dayFutureBills = futureBillRows
-            .filter(b => b.del_date && toISTDate(b.del_date) > dStr)
-            .reduce((sum, b) => sum + parseFloat(b.total_amount), 0);
+        // 2. Add updates for each shop in the group specifically
+        for (const shopIdItem of linkedShopIds) {
+            const agg = dailyAggregates[shopIdItem][dStr] || { bill: 0, cash: 0, upi: 0, cheque: 0, adj: 0, returns: 0 };
+            const dayFutureBills = futureBillRows
+                .filter(b => b.shop_id === shopIdItem && b.del_date && toISTDate(b.del_date) > dStr)
+                .reduce((sum, b) => sum + parseFloat(b.total_amount), 0);
 
-        dcUpdates.push({
-            collection_date: d.collection_date,
-            old_balance: newOldBal,
-            todays_bill_amount: agg.bill,
-            cash_collected: agg.cash,
-            upi_collected: agg.upi,
-            cheque_collected: agg.cheque,
-            manual_adjustments: agg.adj,
-            return_amount: agg.returns || 0,
-            total_balance: newTotalBal,
-            future_bills: dayFutureBills
-        });
+            dcUpdates.push({
+                shop_id: shopIdItem,
+                collection_date: d.collection_date,
+                old_balance: newOldBal,
+                todays_bill_amount: agg.bill,
+                cash_collected: agg.cash,
+                upi_collected: agg.upi,
+                cheque_collected: agg.cheque,
+                manual_adjustments: agg.adj,
+                return_amount: agg.returns || 0,
+                total_balance: newTotalBal,
+                future_bills: dayFutureBills
+            });
+        }
 
         lastDayTotal = newTotalBal;
     }
 
-    // HIGH-PERFORMANCE BATCH UPDATE 2: daily_collections
+    // HIGH-PERFORMANCE BATCH UPSERT: daily_collections using ON DUPLICATE KEY UPDATE
     if (dcUpdates.length > 0) {
-        let dcSql = 'UPDATE daily_collections SET ';
-        const fields = ['old_balance', 'todays_bill_amount', 'cash_collected', 'upi_collected', 'cheque_collected', 'manual_adjustments', 'return_amount', 'total_balance', 'future_bills'];
-        const sqlParts = [];
-        const dcParams = [];
-
-        fields.forEach(field => {
-            let part = `${field} = CASE collection_date `;
-            dcUpdates.forEach(row => {
-                part += 'WHEN ? THEN ? ';
-                dcParams.push(row.collection_date, row[field]);
-            });
-            part += 'END';
-            sqlParts.push(part);
-        });
-
-        dcSql += sqlParts.join(', ');
-        dcSql += ' WHERE shop_id = ? AND collection_date IN (' + dcUpdates.map(() => '?').join(',') + ')';
+        const insertFields = [
+            'shop_id', 'collection_date', 'old_balance', 'todays_bill_amount', 
+            'cash_collected', 'upi_collected', 'cheque_collected', 
+            'manual_adjustments', 'return_amount', 'total_balance', 'future_bills'
+        ];
         
-        dcParams.push(shopId);
-        dcUpdates.forEach(row => dcParams.push(row.collection_date));
+        let dcSql = `INSERT INTO daily_collections (${insertFields.join(', ')}) VALUES `;
+        const dcParams = [];
+        
+        const valuePlaceholders = dcUpdates.map(row => {
+            dcParams.push(
+                row.shop_id, row.collection_date, row.old_balance, row.todays_bill_amount,
+                row.cash_collected, row.upi_collected, row.cheque_collected,
+                row.manual_adjustments, row.return_amount, row.total_balance, row.future_bills
+            );
+            return '(' + insertFields.map(() => '?').join(', ') + ')';
+        }).join(', ');
+        
+        dcSql += valuePlaceholders;
+        dcSql += ` ON DUPLICATE KEY UPDATE 
+            old_balance = VALUES(old_balance),
+            todays_bill_amount = VALUES(todays_bill_amount),
+            cash_collected = VALUES(cash_collected),
+            upi_collected = VALUES(upi_collected),
+            cheque_collected = VALUES(cheque_collected),
+            manual_adjustments = VALUES(manual_adjustments),
+            return_amount = VALUES(return_amount),
+            total_balance = VALUES(total_balance),
+            future_bills = VALUES(future_bills)`;
 
         await connection.query(dcSql, dcParams);
-        console.log(`[RIPPLE] Batch updated ${dcUpdates.length} daily collection dates in 1 query.`);
+        console.log(`[RIPPLE] Batch updated ${dcUpdates.length} daily collection rows.`);
     }
 
-    // 6. Update general shop balance in shop_balances
-    await connection.query(
-        'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-        [shopId, runningBalance]
-    );
+    // 6. Update general shop balance in shop_balances for all shops in the group
+    for (const shopIdItem of linkedShopIds) {
+        await connection.query(
+            'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+            [shopIdItem, runningBalance]
+        );
+    }
 
     return runningBalance;
 }

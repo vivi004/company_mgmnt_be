@@ -13,7 +13,7 @@ const getShopsByOrderLine = async (req, res) => {
     try {
         const [shops] = await db.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
-                    COALESCE(sb.balance, 0) as balance, s.created_at,
+                    s.parent_shop_id, COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.area_name,
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
@@ -42,7 +42,7 @@ const getAllShops = async (req, res) => {
     try {
         const [shops] = await db.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
-                    COALESCE(sb.balance, 0) as balance, s.created_at,
+                    s.parent_shop_id, COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.name AS ol_village_name, ol.area_name, ol.node_id
              FROM shops s
              LEFT JOIN shop_balances sb ON s.id = sb.shop_id
@@ -63,7 +63,7 @@ const createShop = async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by } = req.body;
+    let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by, parent_shop_id } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -80,8 +80,8 @@ const createShop = async (req, res) => {
         
         // 1. Insert into shops
         const [result] = await connection.query(
-            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '']
+            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, parent_shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', parent_shop_id || null]
         );
         const shopId = result.insertId;
 
@@ -155,14 +155,14 @@ const updateShop = async (req, res) => {
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     const { id } = req.params;
-    const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance } = req.body;
+    const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, parent_shop_id } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
         // Fetch current shop and balance
         const [oldShops] = await connection.query(`
-            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id 
+            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.parent_shop_id 
             FROM shops s
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE s.id = ? FOR UPDATE
@@ -177,10 +177,13 @@ const updateShop = async (req, res) => {
         const oldBalance = parseFloat(oldShop.balance);
         const newBalance = balance !== undefined ? parseFloat(balance) : oldBalance;
 
+        const newParentShopId = parent_shop_id !== undefined ? (parent_shop_id === '' ? null : parent_shop_id) : oldShop.parent_shop_id;
+        const parentShopIdChanged = oldShop.parent_shop_id !== newParentShopId;
+
         // 1. Update shops table (excluding balance)
         await connection.query(
-            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ? WHERE id = ?`,
-            [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, id]
+            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ?, parent_shop_id = ? WHERE id = ?`,
+            [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, newParentShopId, id]
         );
 
         // 2. Update shop_balances table
@@ -197,6 +200,10 @@ const updateShop = async (req, res) => {
                 [shop_name, village_name || '', id]
             );
         }
+
+        // Fetch IST Date
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+        const todayIST = dateRows[0].today;
 
         // 3. If balance was changed manually, log it
         if (oldBalance !== newBalance) {
@@ -215,9 +222,6 @@ const updateShop = async (req, res) => {
             );
 
             // Update daily_collections for this manual edit
-            const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
-            const todayIST = dateRows[0].today;
-
             // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
             const [futureRows] = await connection.query(
                 "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
@@ -234,10 +238,17 @@ const updateShop = async (req, res) => {
                 ON DUPLICATE KEY UPDATE
                     total_balance = VALUES(total_balance)
             `, [id, shop_name, village_name || '', oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
+        }
 
-            // Recalculate daily collections balance ripple
-            await financialService.rebuildRipple(connection, id, todayIST);
+        // Recalculate daily collections balance ripple
+        await financialService.rebuildRipple(connection, id, todayIST);
 
+        // If parent shop ID changed, rebuild the old parent shop's ripple as well
+        if (parentShopIdChanged && oldShop.parent_shop_id) {
+            await financialService.rebuildRipple(connection, oldShop.parent_shop_id, todayIST);
+        }
+
+        if (oldBalance !== newBalance) {
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
                 shop_name: shop_name,
@@ -560,14 +571,30 @@ const getShopLedger = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = parseInt(req.query.skip) || 0;
     try {
+        // Find all shop IDs in the linked group
+        const [shopRows] = await db.query('SELECT parent_shop_id FROM shops WHERE id = ?', [id]);
+        let linkedShopIds = [parseInt(id)];
+        if (shopRows.length > 0) {
+            const parentId = shopRows[0].parent_shop_id || id;
+            const [groupRows] = await db.query('SELECT id FROM shops WHERE id = ? OR parent_shop_id = ?', [parentId, parentId]);
+            if (groupRows.length > 0) {
+                linkedShopIds = groupRows.map(r => r.id);
+            }
+        }
+
         const [transactions] = await db.query(
-            `SELECT id, shop_id, type, amount, payment_mode, transaction_category, description, 
-                    balance_after, approval_status, affects_balance, created_by, transaction_date, approved_by, approved_at, rejected_reason, created_at 
-             FROM shop_transactions WHERE shop_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
-            [id, limit, skip]
+            `SELECT t.id, t.shop_id, s.shop_name, s.village_name, t.type, t.amount, t.payment_mode, t.transaction_category, t.description, 
+                    t.balance_after, t.approval_status, t.affects_balance, t.created_by, t.transaction_date, t.approved_by, t.approved_at, t.rejected_reason, t.created_at 
+             FROM shop_transactions t
+             JOIN shops s ON t.shop_id = s.id
+             WHERE t.shop_id IN (?) 
+             ORDER BY t.transaction_date DESC, t.id DESC 
+             LIMIT ? OFFSET ?`,
+            [linkedShopIds, limit, skip]
         );
         res.json(transactions);
     } catch (err) {
+        console.error('getShopLedger error:', err);
         res.status(500).json({ error: 'Failed to fetch ledger' });
     }
 };

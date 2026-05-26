@@ -26,6 +26,13 @@ async function rebuildRipple(connection, shopId, targetDate) {
     }
     console.log(`[RIPPLE] Linked Shop IDs in group: ${linkedShopIds.join(', ')}`);
 
+    // Fetch details for all group shops so we have their names, routes, and villages for daily_collections
+    const [groupDetailRows] = await connection.query('SELECT id, shop_name, village_name, order_line_id FROM shops WHERE id IN (?)', [linkedShopIds]);
+    const shopDetailsMap = {};
+    for (const row of groupDetailRows) {
+        shopDetailsMap[row.id] = row;
+    }
+
     // 1. Get the group's earliest registration date and sum of opening balances
     const [shopInfo] = await connection.query(
         'SELECT COALESCE(SUM(sb.opening_balance), 0) as opening_balance, MIN(DATE(s.created_at)) as created_date FROM shops s LEFT JOIN shop_balances sb ON s.id = sb.shop_id WHERE s.id IN (?)',
@@ -218,8 +225,13 @@ async function rebuildRipple(connection, shopId, targetDate) {
                 .filter(b => b.shop_id === shopIdItem && b.del_date && toISTDate(b.del_date) > dStr)
                 .reduce((sum, b) => sum + parseFloat(b.total_amount), 0);
 
+            const shopMeta = shopDetailsMap[shopIdItem] || { shop_name: '', village_name: '', order_line_id: 0 };
+
             dcUpdates.push({
                 shop_id: shopIdItem,
+                shop_name: shopMeta.shop_name,
+                village_name: shopMeta.village_name || '',
+                order_line_id: shopMeta.order_line_id,
                 collection_date: d.collection_date,
                 old_balance: newOldBal,
                 todays_bill_amount: agg.bill,
@@ -239,7 +251,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
     // HIGH-PERFORMANCE BATCH UPSERT: daily_collections using ON DUPLICATE KEY UPDATE
     if (dcUpdates.length > 0) {
         const insertFields = [
-            'shop_id', 'collection_date', 'old_balance', 'todays_bill_amount', 
+            'shop_id', 'shop_name', 'village_name', 'order_line_id', 'collection_date', 'old_balance', 'todays_bill_amount', 
             'cash_collected', 'upi_collected', 'cheque_collected', 
             'manual_adjustments', 'return_amount', 'total_balance', 'future_bills'
         ];
@@ -249,7 +261,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
         
         const valuePlaceholders = dcUpdates.map(row => {
             dcParams.push(
-                row.shop_id, row.collection_date, row.old_balance, row.todays_bill_amount,
+                row.shop_id, row.shop_name, row.village_name, row.order_line_id, row.collection_date, row.old_balance, row.todays_bill_amount,
                 row.cash_collected, row.upi_collected, row.cheque_collected,
                 row.manual_adjustments, row.return_amount, row.total_balance, row.future_bills
             );

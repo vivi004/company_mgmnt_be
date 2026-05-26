@@ -66,10 +66,12 @@ const approveTransactionsBulk = async (req, res) => {
         });
 
         const results = [];
+        const allPendingWebhooks = []; // Collect webhooks to send AFTER rebuildRipple corrects balance_after
 
         // For each shop, process approvals sequentially
         for (const shopId of Object.keys(txsByShop)) {
             const shopTxs = txsByShop[shopId];
+            const shopWebhooks = []; // Per-shop webhook queue — populated before ripple, sent after
 
             // Get Shop and lock
             const [shops] = await connection.query(`
@@ -147,8 +149,9 @@ const approveTransactionsBulk = async (req, res) => {
 
                 results.push({ tx_id: tx.id, shop_id: tx.shop_id, status: 'APPROVED', new_balance: newBalance });
 
-                // Push Webhook
-                webhookService.sendTransactionToWebhook({
+                // Queue webhook — balance_after will be updated after rebuildRipple corrects it
+                shopWebhooks.push({
+                    tx_id: tx.id, // Used to look up corrected balance_after after ripple
                     shop_id: tx.shop_id,
                     shop_name: shop.shop_name,
                     village_name: shop.village_name,
@@ -158,7 +161,6 @@ const approveTransactionsBulk = async (req, res) => {
                     payment_method: tx.payment_mode,
                     description: tx.description + ' (APPROVED)',
                     balance_before: balanceBefore,
-                    balance_after: newBalance,
                     created_by: actingUserName
                 });
             }
@@ -174,11 +176,34 @@ const approveTransactionsBulk = async (req, res) => {
                 const [earliestRows] = await connection.query("SELECT DATE_FORMAT(?, '%Y-%m-%d') as tx_date", [earliestTxDate]);
                 const earliestTxDateStr = earliestRows[0].tx_date;
                 await financialService.rebuildRipple(connection, shopId, earliestTxDateStr);
+
+                // Re-read ripple-corrected balance_after from DB for each transaction in this shop
+                if (shopWebhooks.length > 0) {
+                    const webhookTxIds = shopWebhooks.map(w => w.tx_id);
+                    const [correctedRows] = await connection.query(
+                        'SELECT id, balance_after FROM shop_transactions WHERE id IN (?)',
+                        [webhookTxIds]
+                    );
+                    const correctedMap = {};
+                    correctedRows.forEach(r => { correctedMap[r.id] = parseFloat(r.balance_after); });
+                    shopWebhooks.forEach(w => {
+                        allPendingWebhooks.push({ ...w, balance_after: correctedMap[w.tx_id] ?? 0 });
+                    });
+                }
+            } else {
+                // No ripple needed — copy webhooks with manually-computed balances as fallback
+                shopWebhooks.forEach(w => allPendingWebhooks.push({ ...w, balance_after: currentBalance }));
             }
         }
 
         await connection.commit();
         cacheService.flush();
+
+        // Send all queued webhooks AFTER commit, with ripple-corrected balance_after values
+        for (const payload of allPendingWebhooks) {
+            const { tx_id, ...webhookPayload } = payload; // Strip internal tx_id before sending
+            webhookService.sendTransactionToWebhook(webhookPayload);
+        }
 
         res.json({ message: `Successfully approved ${results.length} transactions`, results });
     } catch (err) {

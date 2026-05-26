@@ -30,6 +30,7 @@ async function runMidnightRollover() {
  */
 async function applyDueBills() {
     const todayIST = getISTDateString(0);
+    const yesterdayIST = getISTDateString(-1);
 
     console.log(`[CRON] Applying due bills for delivery date: ${todayIST}`);
 
@@ -59,76 +60,118 @@ async function applyDueBills() {
         const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
         const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
 
+        // ── GROUP by shop_id ──
+        // This ensures rebuildRipple is called ONCE per shop (not once per bill),
+        // preventing redundant intermediate ripple calls that corrupt daily_collections.
+        const billsByShop = {};
         for (const bill of dueBills) {
-            const amount = parseFloat(bill.total_amount) || 0;
-            
-            // Query fresh current balance of the shop to avoid race condition/overwriting with concurrent bills
+            if (!billsByShop[bill.shop_id]) billsByShop[bill.shop_id] = [];
+            billsByShop[bill.shop_id].push(bill);
+        }
+
+        // Collect webhook payloads — sent AFTER commit with ripple-corrected balance_after values
+        const pendingWebhooks = [];
+
+        for (const shopId of Object.keys(billsByShop)) {
+            const shopBills = billsByShop[shopId];
+            const insertedTxIds = []; // Track IDs so we can re-read corrected balance_after after ripple
+
+            // Re-read current balance fresh for this shop (inside the transaction for lock consistency)
             const [shopBalanceRows] = await connection.query(
                 'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ? FOR UPDATE',
-                [bill.shop_id]
+                [shopId]
             );
-            const currentBalance = shopBalanceRows.length > 0 ? parseFloat(shopBalanceRows[0].balance) : 0;
-            const newBalance = currentBalance + amount;
+            let runningBalance = shopBalanceRows.length > 0 ? parseFloat(shopBalanceRows[0].balance) : 0;
 
-            // 1. Apply to shop_balances
-            await connection.query(
-                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
-                [bill.shop_id, newBalance]
-            );
+            for (const bill of shopBills) {
+                const amount = parseFloat(bill.total_amount) || 0;
+                const balanceBefore = runningBalance;
+                runningBalance += amount;
 
-            // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
-            await connection.query(
-                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, newBalance, bill.created_by || 'System', istTimestamp]
-            );
+                // 1. Apply to shop_balances (each bill chains from the previous)
+                await connection.query(
+                    'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                    [shopId, runningBalance]
+                );
 
-            // 3. Update daily_collections for today — add to todays_bill_amount + total_balance
-            await connection.query(`
-                INSERT INTO daily_collections
-                    (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                ON DUPLICATE KEY UPDATE
-                    todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
-                    total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
-            `, [bill.shop_id, bill.shop_name, bill.village_name, bill.order_line_id,
-                todayIST, amount, currentBalance, newBalance]);
+                // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
+                const [txResult] = await connection.query(
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, runningBalance, bill.created_by || 'System', istTimestamp]
+                );
+                insertedTxIds.push(txResult.insertId);
 
-            // 4. Also remove from yesterday's future_bills (if it was tracked there)
-            const yesterdayIST = getISTDateString(-1);
-            await connection.query(`
-                UPDATE daily_collections
-                SET future_bills = GREATEST(0, future_bills - ?)
-                WHERE shop_id = ? AND collection_date = ?
-            `, [amount, bill.shop_id, yesterdayIST]);
+                // 3. Update daily_collections for today — add to todays_bill_amount + total_balance
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                `, [bill.shop_id, bill.shop_name, bill.village_name, bill.order_line_id,
+                    todayIST, amount, balanceBefore, runningBalance]);
 
-            // 5. Mark bill as applied
-            await connection.query(
-                'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
-                [bill.id]
-            );
+                // 4. Also remove from yesterday's future_bills (if it was tracked there)
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET future_bills = GREATEST(0, future_bills - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [amount, bill.shop_id, yesterdayIST]);
 
-            // 6. Push to Ledger (Google Sheets)
-            webhookService.sendTransactionToWebhook({
-                shop_id: bill.shop_id,
-                shop_name: bill.shop_name,
-                village_name: bill.village_name,
-                specific_area: bill.specific_area || '',
-                type: 'Bill',
-                amount: amount,
-                description: `Delivery Due — Invoice Applied`,
-                balance_before: currentBalance,
-                balance_after: newBalance,
-                created_by: bill.created_by || 'System',
-                reference_id: bill.id
-            });
+                // 5. Mark bill as applied
+                await connection.query(
+                    'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
+                    [bill.id]
+                );
 
-            // 7. MASTER SYNC: Ripple forward from today
-            await financialService.rebuildRipple(connection, bill.shop_id, todayIST);
+                // Queue webhook payload (balance_after is provisional — overwritten after ripple)
+                pendingWebhooks.push({
+                    tx_id: txResult.insertId,
+                    shop_id: bill.shop_id,
+                    shop_name: bill.shop_name,
+                    village_name: bill.village_name,
+                    specific_area: bill.specific_area || '',
+                    type: 'Bill',
+                    amount: amount,
+                    description: `Delivery Due — Invoice Applied`,
+                    balance_before: balanceBefore,
+                    balance_after: runningBalance, // Provisional — corrected after rebuildRipple below
+                    created_by: bill.created_by || 'System'
+                });
+            }
+
+            // 6. MASTER SYNC: Ripple forward from today — called ONCE per shop, not once per bill
+            await financialService.rebuildRipple(connection, parseInt(shopId), todayIST);
+
+            // 7. Re-read ripple-corrected balance_after for all transactions inserted for this shop
+            if (insertedTxIds.length > 0) {
+                const [correctedRows] = await connection.query(
+                    'SELECT id, balance_after FROM shop_transactions WHERE id IN (?)',
+                    [insertedTxIds]
+                );
+                const correctedMap = {};
+                correctedRows.forEach(r => { correctedMap[r.id] = parseFloat(r.balance_after); });
+
+                // Update provisional balance_after in pending webhooks with ripple-verified values
+                for (const pw of pendingWebhooks) {
+                    if (insertedTxIds.includes(pw.tx_id)) {
+                        pw.balance_after = correctedMap[pw.tx_id] ?? pw.balance_after;
+                    }
+                }
+            }
         }
 
         await connection.commit();
         console.log(`[CRON] Applied ${dueBills.length} delivery-date bills to shop balances.`);
+
+        // 8. Send all webhooks AFTER commit, with ripple-corrected balance_after values
+        for (const payload of pendingWebhooks) {
+            const { tx_id, ...webhookData } = payload; // Strip internal tx_id before sending
+            webhookService.sendTransactionToWebhook(webhookData);
+        }
+
     } catch (err) {
         await connection.rollback();
         console.error('[CRON] applyDueBills transaction error:', err.message);
@@ -136,6 +179,7 @@ async function applyDueBills() {
         connection.release();
     }
 }
+
 
 /**
  * TASK 3: Prune Ledger Transactions older than 3 months (90 days)
@@ -249,6 +293,16 @@ function startScheduler() {
 
     console.log('[SCHEDULER] Midnight IST rollover scheduled (18:30 UTC = 00:00 IST).');
 
+    // Webhook Sync Retry Cron: runs every 15 minutes to catch up unsynced ledger transactions
+    cron.schedule('*/15 * * * *', async () => {
+        try {
+            await webhookService.retryFailedSyncs();
+        } catch (e) {
+            console.error('[SCHEDULER] Background sync retry cron failed:', e.message);
+        }
+    });
+    console.log('[SCHEDULER] Webhook Sync Failure Queue (Automatic Catchup) scheduled every 15 minutes.');
+
     // Also run it once immediately on server startup to clean up historical data right away!
     setTimeout(async () => {
         try {
@@ -257,6 +311,15 @@ function startScheduler() {
             console.error('[SCHEDULER] Immediate startup prune failed:', e.message);
         }
     }, 5000);
+
+    // Run the webhook retry task on startup after a brief delay
+    setTimeout(async () => {
+        try {
+            await webhookService.retryFailedSyncs();
+        } catch (e) {
+            console.error('[SCHEDULER] Immediate startup webhook retry failed:', e.message);
+        }
+    }, 10000);
 }
 
 module.exports = { startScheduler, runMidnightRollover, applyDueBills, pruneOldLedgerTransactions };

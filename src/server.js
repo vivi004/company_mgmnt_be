@@ -296,6 +296,24 @@ app.listen(PORT, async () => {
             console.error('Warning altering shop_transactions transaction_category:', e.message);
         }
 
+        // Alter shop_transactions to add is_synced_to_sheet column
+        try {
+            const [columns] = await db.query(`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shop_transactions' AND COLUMN_NAME = 'is_synced_to_sheet'
+            `);
+            if (columns.length === 0) {
+                await db.query(`
+                    ALTER TABLE shop_transactions 
+                    ADD COLUMN is_synced_to_sheet TINYINT DEFAULT 1
+                `);
+                console.log("Added column 'is_synced_to_sheet' to shop_transactions");
+            }
+        } catch (e) {
+            console.error("Warning verifying 'is_synced_to_sheet' column:", e.message);
+        }
+
 
         // Ensure daily_collections has all required columns
         const dcColumns = [

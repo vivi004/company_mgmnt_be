@@ -17,7 +17,7 @@ async function debug() {
 
         for (const shop of shops) {
             console.log(`\n======================= SHOP: ${shop.shop_name} (ID: ${shop.id}) =======================`);
-            
+
             const [balance] = await connection.query("SELECT * FROM shop_balances WHERE shop_id = ?", [shop.id]);
             console.log("shop_balances:", JSON.stringify(balance, null, 2));
 

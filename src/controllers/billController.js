@@ -496,12 +496,141 @@ exports.getUnverifiedBills = async (req, res) => {
 
 exports.verifyBill = async (req, res) => {
     const { id } = req.params;
+    const connection = await db.getConnection();
     try {
-        await db.query('UPDATE bills SET status = "Verified" WHERE id = ?', [id]);
-        res.json({ message: 'Bill verified successfully' });
+        await connection.beginTransaction();
+
+        // 1. Fetch and lock the bill details
+        const [bills] = await connection.query(`
+            SELECT id, shop_id, total_amount, is_applied_to_balance, created_by, status, invoice_no,
+                   DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str,
+                   DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str
+            FROM bills WHERE id = ? FOR UPDATE
+        `, [id]);
+
+        if (bills.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Bill not found' });
+        }
+        const bill = bills[0];
+
+        // 2. Update status to Verified
+        await connection.query('UPDATE bills SET status = "Verified" WHERE id = ?', [id]);
+
+        // 3. Determine if the bill should be applied immediately
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+        const todayStr = dateRows[0].today;
+
+        const deliveryDateStr = bill.delivery_date_str || bill.bill_date_str;
+        const isFutureBill = deliveryDateStr > todayStr;
+
+        let webhookPayload = null;
+        let isAppliedNow = false;
+
+        // If today or past delivery date, and not applied yet, apply now!
+        if (!isFutureBill && bill.is_applied_to_balance === 0) {
+            // Lock the shop's balance row
+            const [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.shop_name, s.village_name, s.owner_name as specific_area
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE s.id = ? FOR UPDATE
+            `, [bill.shop_id]);
+
+            if (shops.length > 0) {
+                const shop = shops[0];
+                const amount = parseFloat(bill.total_amount) || 0;
+                const balanceBefore = parseFloat(shop.balance);
+                const finalBalance = balanceBefore + amount;
+
+                // 1. Update shop_balances table
+                await connection.query(
+                    'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                    [shop.id, finalBalance]
+                );
+
+                // Prepare IST timestamp
+                const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+                const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
+
+                // 2. Insert into shop_transactions ledger
+                const [txResult] = await connection.query(`
+                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date)
+                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?)
+                `, [shop.id, amount, bill.id, `Invoice #${bill.invoice_no} (Verified & Applied)`, finalBalance, bill.created_by || 'Staff', istTimestamp]);
+
+                // 3. Update daily_collections row for delivery date
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                `, [shop.id, shop.shop_name, shop.village_name, shop.order_line_id,
+                    deliveryDateStr, amount, balanceBefore, finalBalance]);
+
+                // 4. Subtract from yesterday's future_bills if tracked there
+                const yesterdayIST = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET future_bills = GREATEST(0, future_bills - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [amount, shop.id, yesterdayIST]);
+
+                // 5. Update bill as applied
+                await connection.query(
+                    'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
+                    [bill.id]
+                );
+
+                // 6. Ripple heal the ledger forward starting from deliveryDateStr
+                await financialService.rebuildRipple(connection, shop.id, deliveryDateStr);
+
+                // Fetch ripple-corrected balance_after for webhook payload accuracy
+                const [correctedRows] = await connection.query(
+                    'SELECT balance_after FROM shop_transactions WHERE id = ?',
+                    [txResult.insertId]
+                );
+                const correctedBalanceAfter = correctedRows.length > 0 ? parseFloat(correctedRows[0].balance_after) : finalBalance;
+
+                isAppliedNow = true;
+                webhookPayload = {
+                    shop_id: shop.id,
+                    shop_name: shop.shop_name,
+                    village_name: shop.village_name,
+                    specific_area: shop.specific_area || '',
+                    type: 'Bill',
+                    amount: amount,
+                    description: `Invoice #${bill.invoice_no}`,
+                    balance_before: balanceBefore,
+                    balance_after: correctedBalanceAfter,
+                    created_by: bill.created_by || 'Staff',
+                    reference_id: bill.id
+                };
+            }
+        }
+
+        await connection.commit();
+        cacheService.flush();
+
+        // 7. Send webhook outside transaction lock to prevent holding DB connections open
+        if (webhookPayload) {
+            webhookService.sendTransactionToWebhook(webhookPayload);
+        }
+
+        res.json({
+            message: isAppliedNow
+                ? 'Bill verified and successfully applied to shop ledger and sheet'
+                : 'Bill verified successfully (future-dated bill; balance will apply on delivery date)'
+        });
     } catch (err) {
+        if (connection) await connection.rollback();
         console.error('Error verifying bill:', err);
-        res.status(500).json({ error: 'Failed to verify bill' });
+        res.status(500).json({ error: 'Failed to verify bill', detail: err.message });
+    } finally {
+        if (connection) connection.release();
     }
 };
 

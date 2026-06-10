@@ -35,6 +35,26 @@ const ensureSettings = async () => {
             await db.query("ALTER TABLE app_settings ADD COLUMN last_sheet_sync_time VARCHAR(100)");
         } catch (e) {}
     }
+    if (!settingsColNames.includes('upi_id_1')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN upi_id_1 VARCHAR(255) DEFAULT 'nishaoilmills@ybl'");
+        } catch (e) {}
+    }
+    if (!settingsColNames.includes('upi_name_1')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN upi_name_1 VARCHAR(255) DEFAULT 'NISHA OIL MILL'");
+        } catch (e) {}
+    }
+    if (!settingsColNames.includes('upi_id_2')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN upi_id_2 VARCHAR(255) DEFAULT 'nishaoilmills@okaxis'");
+        } catch (e) {}
+    }
+    if (!settingsColNames.includes('upi_name_2')) {
+        try {
+            await db.query("ALTER TABLE app_settings ADD COLUMN upi_name_2 VARCHAR(255) DEFAULT 'NISHA OIL MILL'");
+        } catch (e) {}
+    }
     await db.query(`
         INSERT IGNORE INTO app_settings (id, next_invoice_no, last_invoice_no, ledger_sheet_url)
         VALUES (1, 1001, 1000, 'https://docs.google.com/spreadsheets/d/1slf-BRcvxU6OzKYxnzGOFeJz38IGN--nnAw0gpXWLiI/edit?gid=0#gid=0')
@@ -92,7 +112,7 @@ exports.getInvoiceSettings = async (req, res) => {
     try {
         await ensureSettings();
         await ensureShopsColumns(); // ensure phone/phone2 columns exist in shops
-        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1');
+        const [rows] = await db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time, upi_id_1, upi_name_1, upi_id_2, upi_name_2 FROM app_settings WHERE id = 1');
         res.json(rows[0]);
     } catch (err) {
         console.error('Error getting invoice settings:', err);
@@ -101,9 +121,9 @@ exports.getInvoiceSettings = async (req, res) => {
 };
 
 // PUT /api/settings/invoice
-// Body: { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time }
+// Body: { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time, upi_id_1, upi_name_1, upi_id_2, upi_name_2 }
 exports.updateInvoiceSettings = async (req, res) => {
-    const { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time } = req.body;
+    const { next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time, upi_id_1, upi_name_1, upi_id_2, upi_name_2 } = req.body;
     try {
         await ensureSettings();
         const fields = [];
@@ -112,6 +132,10 @@ exports.updateInvoiceSettings = async (req, res) => {
         if (last_invoice_no !== undefined) { fields.push('last_invoice_no = ?'); values.push(last_invoice_no); }
         if (ledger_sheet_url !== undefined) { fields.push('ledger_sheet_url = ?'); values.push(ledger_sheet_url); }
         if (last_sheet_sync_time !== undefined) { fields.push('last_sheet_sync_time = ?'); values.push(last_sheet_sync_time); }
+        if (upi_id_1 !== undefined) { fields.push('upi_id_1 = ?'); values.push(upi_id_1); }
+        if (upi_name_1 !== undefined) { fields.push('upi_name_1 = ?'); values.push(upi_name_1); }
+        if (upi_id_2 !== undefined) { fields.push('upi_id_2 = ?'); values.push(upi_id_2); }
+        if (upi_name_2 !== undefined) { fields.push('upi_name_2 = ?'); values.push(upi_name_2); }
         if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
         await db.query(`UPDATE app_settings SET ${fields.join(', ')} WHERE id = 1`, values);
         res.json({ message: 'Invoice settings updated' });
@@ -189,7 +213,7 @@ exports.getDashboardBootstrap = async (req, res) => {
             [unverifiedRows],
             [verifiedRows]
         ] = await Promise.all([
-            db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time FROM app_settings WHERE id = 1'),
+            db.query('SELECT next_invoice_no, last_invoice_no, ledger_sheet_url, last_sheet_sync_time, upi_id_1, upi_name_1, upi_id_2, upi_name_2 FROM app_settings WHERE id = 1'),
             db.query('SELECT * FROM motor_vehicles ORDER BY created_at DESC'),
             db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Unverified"'),
             db.query('SELECT COUNT(*) as count FROM bills WHERE status = "Verified"')

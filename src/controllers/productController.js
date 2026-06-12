@@ -29,11 +29,17 @@ exports.getProductRates = async (req, res) => {
                 const connection = await db.getConnection();
                 try {
                     await connection.beginTransaction();
+                    const repairValues = [];
+                    const repairPlaceholders = [];
                     for (const [id, rate] of Object.entries(backupData)) {
                         if (rate === null || rate === undefined) continue;
+                        repairValues.push(id, rate);
+                        repairPlaceholders.push('(?, ?)');
+                    }
+                    if (repairValues.length > 0) {
                         await connection.query(
-                            'INSERT INTO product_rates (product_id, rate) VALUES (?, ?) ON DUPLICATE KEY UPDATE rate = ?',
-                            [id, rate, rate]
+                            `INSERT INTO product_rates (product_id, rate) VALUES ${repairPlaceholders.join(', ')} ON DUPLICATE KEY UPDATE rate = VALUES(rate)`,
+                            repairValues
                         );
                     }
                     await connection.commit();
@@ -94,13 +100,19 @@ exports.syncProductRates = async (req, res) => {
     try {
         await connection.beginTransaction();
         
-        // Upsert rates
+        // Upsert rates in a single bulk query
+        const values = [];
+        const placeholders = [];
         for (const [id, rate] of Object.entries(rates)) {
             if (rate === null || rate === undefined) continue;
-            
+            values.push(id, rate);
+            placeholders.push('(?, ?)');
+        }
+        
+        if (values.length > 0) {
             await connection.query(
-                'INSERT INTO product_rates (product_id, rate) VALUES (?, ?) ON DUPLICATE KEY UPDATE rate = ?',
-                [id, rate, rate]
+                `INSERT INTO product_rates (product_id, rate) VALUES ${placeholders.join(', ')} ON DUPLICATE KEY UPDATE rate = VALUES(rate)`,
+                values
             );
         }
 

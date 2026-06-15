@@ -161,13 +161,21 @@ async function rebuildRipple(connection, shopId, targetDate) {
         [linkedShopIds]
     );
     
-    // 5. Fetch all future collection dates for the group
-    const [dates] = await connection.query(
+    // 5. Fetch all unique collection dates from both existing daily_collections and new transactions
+    const [dbDates] = await connection.query(
         `SELECT DISTINCT collection_date FROM daily_collections 
-         WHERE shop_id IN (?) AND collection_date >= ? 
-         ORDER BY collection_date ASC`,
+         WHERE shop_id IN (?) AND collection_date >= ?`,
         [linkedShopIds, targetDate]
     );
+
+    const mergedDatesSet = new Set();
+    for (const d of dbDates) {
+        mergedDatesSet.add(toISTDate(d.collection_date));
+    }
+    for (const tx of transactions) {
+        mergedDatesSet.add(toISTDate(tx.transaction_date));
+    }
+    const sortedDatesStr = Array.from(mergedDatesSet).sort();
 
     const [prevDay] = await connection.query(
         `SELECT total_balance FROM daily_collections 
@@ -189,9 +197,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
     }
 
     // Calculate all daily_collections updates in-memory
-    for (const d of dates) {
-        const dStr = toISTDate(d.collection_date);
-        
+    for (const dStr of sortedDatesStr) {
         if (!dcOpeningBalanceApplied && dStr >= createdDateStr) {
             lastDayTotal += openingBalance;
             dcOpeningBalanceApplied = true;
@@ -232,7 +238,7 @@ async function rebuildRipple(connection, shopId, targetDate) {
                 shop_name: shopMeta.shop_name,
                 village_name: shopMeta.village_name || '',
                 order_line_id: shopMeta.order_line_id,
-                collection_date: d.collection_date,
+                collection_date: dStr,
                 old_balance: newOldBal,
                 todays_bill_amount: agg.bill,
                 cash_collected: agg.cash,

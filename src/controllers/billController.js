@@ -823,47 +823,6 @@ exports.updateBill = async (req, res) => {
             console.warn(`[SECURITY WARNING] Mismatch in total_amount for Shop #${bill.shop_id} during edit. Client sent: ${total_amount}, Computed: ${computedAmount}. Enforcing computed total.`);
         }
 
-        // 3. Update shop balance and fix the original 'Bill' transaction amount
-        //    (DO NOT insert a new Adjustment — rebuildRipple reads 'Bill' type transactions
-        //     for todays_bill_amount. An Adjustment goes to manual_adjustments, NOT todays_bill_amount,
-        //     causing Today Collection, Shop Lines, and Shop Page to show the old amount.)
-        let shopId = null;
-        if (diff !== 0) {
-            // Prefer shop_id lookup (more reliable than name+village)
-            let [shops] = await connection.query(`
-                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
-                FROM shops s
-                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
-                WHERE s.id = ? FOR UPDATE
-            `, [bill.shop_id]);
-
-            // Fallback to name lookup for legacy bills
-            if (shops.length === 0) {
-                [shops] = await connection.query(`
-                    SELECT s.id, COALESCE(sb.balance, 0) as balance, s.owner_name as specific_area
-                    FROM shops s
-                    LEFT JOIN shop_balances sb ON s.id = sb.shop_id
-                    WHERE TRIM(s.shop_name) = TRIM(?) AND TRIM(s.village_name) = TRIM(?) FOR UPDATE
-                `, [bill.shop_name, bill.village_name]);
-            }
-            
-            if (shops.length > 0) {
-                const shop = shops[0];
-                shopId = shop.id;
-
-                // ── KEY FIX: Update the original 'Bill' transaction amount ──
-                // rebuildRipple aggregates todays_bill_amount from 'Bill' type transactions.
-                // Updating the original record ensures the new amount propagates correctly.
-                await connection.query(
-                    `UPDATE shop_transactions 
-                     SET amount = ?, description = ?
-                     WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
-                    [newAmount, `Invoice #${bill.invoice_no} (Edited)`, shop.id, id]
-                );
-
-            }
-        }
-
         // 6. Delivery Date Handling
         let mysqlDeliveryDate = bill.delivery_date 
             ? new Date(new Date(bill.delivery_date).getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') 
@@ -930,73 +889,87 @@ exports.updateBill = async (req, res) => {
                 ]
             );
 
-            if (oldDateStr !== newDateStr) {
-                if (!isOldFuture && !isFutureNew) {
-                    // ── SCENARIO 1: Past/Today → Past/Today ──
+            if (!isOldFuture && isFutureNew) {
+                // ── SCENARIO 2: Past/Today → Future ──
+                // Bill moves to future: remove its ledger tx (future bills have no tx; cron applies on delivery day).
+                await connection.query(
+                    `DELETE FROM shop_transactions WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
+                    [collShop.id, id]
+                );
+                // Add to today's future_bills column
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         future_bills, old_balance, total_balance, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)
+                    ON DUPLICATE KEY UPDATE future_bills = future_bills + VALUES(future_bills)
+                `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, todayStrUpd, newAmount]);
+
+                // Ripple recalculation starting from the old delivery date to remove its balance impact
+                await financialService.rebuildRipple(connection, collShop.id, oldDateStr);
+
+            } else if (isOldFuture && !isFutureNew) {
+                // ── SCENARIO 3: Future → Past/Today ──
+                // Applying a deferred bill now: INSERT its ledger tx (rebuildRipple will fix balance_after).
+                await connection.query(
+                    `INSERT INTO shop_transactions
+                         (shop_id, type, amount, reference_id, description, balance_after, transaction_date, created_by)
+                     VALUES (?, 'Bill', ?, ?, ?, 0, ?, ?)`,
+                    [collShop.id, newAmount, id, `Invoice #${bill.invoice_no}`, newDateStr, actingUserName]
+                );
+                // Remove from today's future_bills column
+                await connection.query(
+                    'UPDATE daily_collections SET future_bills = GREATEST(0, future_bills - ?) WHERE shop_id = ? AND collection_date = ?',
+                    [oldAmount, collShop.id, todayStrUpd]
+                );
+
+                // Ripple recalculation starting from the new delivery date to apply its balance impact
+                await financialService.rebuildRipple(connection, collShop.id, newDateStr);
+
+            } else if (!isOldFuture && !isFutureNew) {
+                // ── SCENARIO 1: Past/Today → Past/Today ──
+                if (oldDateStr !== newDateStr) {
                     // Both applied: move shop_transaction to new date so rebuildRipple aggregates correctly.
                     await connection.query(
-                        `UPDATE shop_transactions SET transaction_date = ?, description = ?
+                        `UPDATE shop_transactions SET transaction_date = ?, description = ?, amount = ?
                          WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
-                        [newDateStr, `Invoice #${bill.invoice_no} (Date Edited)`, collShop.id, id]
+                        [newDateStr, `Invoice #${bill.invoice_no} (Date Edited)`, newAmount, collShop.id, id]
                     );
 
-                } else if (!isOldFuture && isFutureNew) {
-                    // ── SCENARIO 2: Past/Today → Future ──
-                    // Bill moves to future: remove its ledger tx (future bills have no tx; cron applies on delivery day).
+                    // MASTER SYNC from the earliest affected date
+                    const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
+                    await financialService.rebuildRipple(connection, collShop.id, earliestDate);
+                } else if (diff !== 0) {
+                    // Same date, amount changed: update shop_transaction amount
                     await connection.query(
-                        `DELETE FROM shop_transactions WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
-                        [collShop.id, id]
+                        `UPDATE shop_transactions SET amount = ?, description = ?
+                         WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
+                        [newAmount, `Invoice #${bill.invoice_no} (Edited)`, collShop.id, id]
                     );
-                    // Add to today's future_bills column
-                    await connection.query(`
-                        INSERT INTO daily_collections
-                            (shop_id, shop_name, village_name, order_line_id, collection_date,
-                             future_bills, old_balance, total_balance, manual_adjustments)
-                        VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)
-                        ON DUPLICATE KEY UPDATE future_bills = future_bills + VALUES(future_bills)
-                    `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, todayStrUpd, newAmount]);
-
-                } else if (isOldFuture && !isFutureNew) {
-                    // ── SCENARIO 3: Future → Past/Today ──
-                    // Applying a deferred bill now: INSERT its ledger tx (rebuildRipple will fix balance_after).
-                    await connection.query(
-                        `INSERT INTO shop_transactions
-                             (shop_id, type, amount, reference_id, description, balance_after, transaction_date, created_by)
-                         VALUES (?, 'Bill', ?, ?, ?, 0, ?, ?)`,
-                        [collShop.id, newAmount, id, `Invoice #${bill.invoice_no}`, newDateStr, actingUserName]
-                    );
-                    // Remove from today's future_bills column
-                    await connection.query(
-                        'UPDATE daily_collections SET future_bills = GREATEST(0, future_bills - ?) WHERE shop_id = ? AND collection_date = ?',
-                        [oldAmount, collShop.id, todayStrUpd]
-                    );
-
+                    await financialService.rebuildRipple(connection, collShop.id, newDateStr);
                 }
-                // ── SCENARIO 4: Future → Different Future ──
+            } else {
+                // ── SCENARIO 4: Future → Future ──
                 // No shop_transaction exists for either date.
                 // rebuildRipple recalculates future_bills from the updated bills table.
+                if (oldDateStr !== newDateStr || diff !== 0) {
+                    // Ensure daily_collections row exists for new date so rebuildRipple can update it
+                    await connection.query(`
+                        INSERT IGNORE INTO daily_collections
+                            (shop_id, shop_name, village_name, order_line_id, collection_date,
+                             todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                        VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0)
+                    `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr]);
 
-                // Ensure daily_collections row exists for new date so rebuildRipple can update it
-                await connection.query(`
-                    INSERT IGNORE INTO daily_collections
-                        (shop_id, shop_name, village_name, order_line_id, collection_date,
-                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
-                    VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0)
-                `, [collShop.id, collShop.shop_name, collShop.village_name, collShop.order_line_id, newDateStr]);
-
-                // MASTER SYNC from the earliest affected date
-                const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
-                await financialService.rebuildRipple(connection, collShop.id, earliestDate);
-
-            } else if (diff !== 0) {
-                // Same date, amount changed — shop_tx already updated above (or was a no-op for future bills).
-                // rebuildRipple re-reads the updated 'Bill' tx (or future_bills from updated bills table).
-                await financialService.rebuildRipple(connection, collShop.id, newDateStr);
+                    // MASTER SYNC from the earliest affected date
+                    const earliestDate = oldDateStr < newDateStr ? oldDateStr : newDateStr;
+                    await financialService.rebuildRipple(connection, collShop.id, earliestDate);
+                }
             }
 
             // ── COMPREHENSIVE WEBHOOK: Sent after all DB work, covering every edit type ──
             // Captures the final balance after rebuildRipple has recalculated everything.
-            if (oldDateStr !== newDateStr || diff !== 0) {
+            if (oldDateStr !== newDateStr || diff !== 0 || isOldFuture !== isFutureNew) {
                 const [finalBalRow] = await connection.query(
                     'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
                     [collShop.id]

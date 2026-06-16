@@ -440,10 +440,35 @@ exports.getAllBills = async (req, res) => {
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
                    b.is_applied_to_balance, b.created_at, 
-                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
+                   COALESCE(
+                       dc.old_balance, 
+                       COALESCE(
+                           prev.total_balance, 
+                           COALESCE(
+                               (
+                                   SELECT tx.balance_after 
+                                   FROM shop_transactions tx 
+                                   WHERE tx.shop_id = b.shop_id 
+                                     AND tx.transaction_date < DATE(b.delivery_date) 
+                                     AND tx.approval_status = 'APPROVED'
+                                   ORDER BY tx.transaction_date DESC, tx.id DESC 
+                                   LIMIT 1
+                               ),
+                               IF(DATE(s.created_at) <= DATE(b.delivery_date), COALESCE(sb.opening_balance, 0), 0)
+                           )
+                       )
+                   ) AS old_balance
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
+            LEFT JOIN shop_balances sb ON b.shop_id = sb.shop_id
+            LEFT JOIN daily_collections dc ON b.shop_id = dc.shop_id AND dc.collection_date = DATE(b.delivery_date)
+            LEFT JOIN daily_collections prev ON b.shop_id = prev.shop_id AND prev.collection_date = (
+                SELECT MAX(collection_date)
+                FROM daily_collections
+                WHERE shop_id = b.shop_id AND collection_date < DATE(b.delivery_date)
+            )
             WHERE b.status = "Verified" 
             ORDER BY b.delivery_date DESC, b.id DESC
             LIMIT ? OFFSET ?
@@ -472,10 +497,35 @@ exports.getUnverifiedBills = async (req, res) => {
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
                    b.is_applied_to_balance, b.created_at, 
-                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
+                   COALESCE(
+                       dc.old_balance, 
+                       COALESCE(
+                           prev.total_balance, 
+                           COALESCE(
+                               (
+                                   SELECT tx.balance_after 
+                                   FROM shop_transactions tx 
+                                   WHERE tx.shop_id = b.shop_id 
+                                     AND tx.transaction_date < DATE(b.delivery_date) 
+                                     AND tx.approval_status = 'APPROVED'
+                                   ORDER BY tx.transaction_date DESC, tx.id DESC 
+                                   LIMIT 1
+                               ),
+                               IF(DATE(s.created_at) <= DATE(b.delivery_date), COALESCE(sb.opening_balance, 0), 0)
+                           )
+                       )
+                   ) AS old_balance
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
+            LEFT JOIN shop_balances sb ON b.shop_id = sb.shop_id
+            LEFT JOIN daily_collections dc ON b.shop_id = dc.shop_id AND dc.collection_date = DATE(b.delivery_date)
+            LEFT JOIN daily_collections prev ON b.shop_id = prev.shop_id AND prev.collection_date = (
+                SELECT MAX(collection_date)
+                FROM daily_collections
+                WHERE shop_id = b.shop_id AND collection_date < DATE(b.delivery_date)
+            )
             WHERE b.status = "Unverified" 
             ORDER BY b.delivery_date DESC, b.id DESC
             LIMIT ? OFFSET ?
@@ -1057,10 +1107,35 @@ exports.getBillsByDateRange = async (req, res) => {
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
                    b.is_applied_to_balance, b.created_at,
-                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name
+                   s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
+                   COALESCE(
+                       dc.old_balance, 
+                       COALESCE(
+                           prev.total_balance, 
+                           COALESCE(
+                               (
+                                   SELECT tx.balance_after 
+                                   FROM shop_transactions tx 
+                                   WHERE tx.shop_id = b.shop_id 
+                                     AND tx.transaction_date < DATE(b.delivery_date) 
+                                     AND tx.approval_status = 'APPROVED'
+                                   ORDER BY tx.transaction_date DESC, tx.id DESC 
+                                   LIMIT 1
+                               ),
+                               IF(DATE(s.created_at) <= DATE(b.delivery_date), COALESCE(sb.opening_balance, 0), 0)
+                           )
+                       )
+                   ) AS old_balance
             FROM bills b 
             LEFT JOIN shops s ON b.shop_id = s.id 
             LEFT JOIN order_lines ol ON s.order_line_id = ol.id
+            LEFT JOIN shop_balances sb ON b.shop_id = sb.shop_id
+            LEFT JOIN daily_collections dc ON b.shop_id = dc.shop_id AND dc.collection_date = DATE(b.delivery_date)
+            LEFT JOIN daily_collections prev ON b.shop_id = prev.shop_id AND prev.collection_date = (
+                SELECT MAX(collection_date)
+                FROM daily_collections
+                WHERE shop_id = b.shop_id AND collection_date < DATE(b.delivery_date)
+            )
             WHERE b.status = "Verified"
         `;
         const params = [];

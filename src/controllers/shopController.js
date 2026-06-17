@@ -169,7 +169,7 @@ const updateShop = async (req, res) => {
 
         // Fetch current shop and balance
         const [oldShops] = await connection.query(`
-            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.parent_shop_id 
+            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.parent_shop_id, s.phone, s.phone2, s.shop_owner
             FROM shops s
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE s.id = ? FOR UPDATE
@@ -216,7 +216,11 @@ const updateShop = async (req, res) => {
         const metadataChanged = 
             (shop_name !== undefined && shop_name !== null && shop_name.trim() !== (oldShop.shop_name || '').trim()) ||
             (village_name !== undefined && village_name !== null && village_name.trim() !== (oldShop.village_name || '').trim()) ||
-            (owner_name !== undefined && owner_name !== null && owner_name.trim() !== (oldShop.specific_area || '').trim());
+            (owner_name !== undefined && owner_name !== null && owner_name.trim() !== (oldShop.specific_area || '').trim()) ||
+            (shop_owner !== undefined && shop_owner !== null && shop_owner.trim() !== (oldShop.shop_owner || '').trim()) ||
+            (phone !== undefined && phone !== null && phone.trim() !== (oldShop.phone || '').trim()) ||
+            (phone2 !== undefined && phone2 !== null && phone2.trim() !== (oldShop.phone2 || '').trim()) ||
+            parentShopIdChanged;
 
         if (oldBalance !== newBalance || metadataChanged) {
             let actingUserName = 'Admin';
@@ -273,6 +277,10 @@ const updateShop = async (req, res) => {
                 shop_name: shop_name || oldShop.shop_name,
                 village_name: village_name || oldShop.village_name,
                 specific_area: owner_name || oldShop.specific_area,
+                shop_owner: shop_owner !== undefined ? shop_owner : oldShop.shop_owner,
+                phone: phone !== undefined ? phone : oldShop.phone,
+                phone2: phone2 !== undefined ? phone2 : oldShop.phone2,
+                parent_shop_id: newParentShopId,
                 type: 'Adjustment',
                 amount: amountDiff,
                 description: descriptionToSend,

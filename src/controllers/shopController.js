@@ -212,8 +212,13 @@ const updateShop = async (req, res) => {
         const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
         const todayIST = dateRows[0].today;
 
-        // 3. If balance was changed manually, log it
-        if (oldBalance !== newBalance) {
+        // 3. Check if balance or metadata changed
+        const metadataChanged = 
+            (shop_name !== undefined && shop_name !== null && shop_name.trim() !== (oldShop.shop_name || '').trim()) ||
+            (village_name !== undefined && village_name !== null && village_name.trim() !== (oldShop.village_name || '').trim()) ||
+            (owner_name !== undefined && owner_name !== null && owner_name.trim() !== (oldShop.specific_area || '').trim());
+
+        if (oldBalance !== newBalance || metadataChanged) {
             let actingUserName = 'Admin';
             if (req.user && req.user.id) {
                 const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [req.user.id]);
@@ -222,48 +227,55 @@ const updateShop = async (req, res) => {
                 }
             }
 
+            const amountDiff = newBalance - oldBalance;
+            const descriptionToSend = oldBalance !== newBalance 
+                ? 'Manual Balance Update (Edit Shop)' 
+                : 'Shop Details Updated (Edit Shop)';
+
             const mysqlDate = new Date();
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [id, 'Adjustment', newBalance - oldBalance, 'Manual Balance Update (Edit Shop)', newBalance, actingUserName, mysqlDate]
+                [id, 'Adjustment', amountDiff, descriptionToSend, newBalance, actingUserName, mysqlDate]
             );
 
-            // Update daily_collections for this manual edit
-            // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
-            const [futureRows] = await connection.query(
-                "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
-                [id, todayIST + ' 23:59:59']
-            );
-            const futureAmount = parseFloat(futureRows[0].future_amount);
-            const dashboardBalance = newBalance - futureAmount;
+            if (oldBalance !== newBalance) {
+                // Update daily_collections for this manual edit
+                // "Zero-Drift" Sync: Subtract any bills with a FUTURE delivery date so they don't affect Today's dashboard balance
+                const [futureRows] = await connection.query(
+                    "SELECT COALESCE(SUM(total_amount), 0) as future_amount FROM bills WHERE shop_id = ? AND delivery_date > ?",
+                    [id, todayIST + ' 23:59:59']
+                );
+                const futureAmount = parseFloat(futureRows[0].future_amount);
+                const dashboardBalance = newBalance - futureAmount;
 
-            await connection.query(`
-                INSERT INTO daily_collections
-                    (shop_id, shop_name, village_name, order_line_id, collection_date,
-                     old_balance, total_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE
-                    total_balance = VALUES(total_balance)
-            `, [id, shop_name, village_name || '', oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
-        }
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         old_balance, total_balance)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        total_balance = VALUES(total_balance)
+                `, [id, shop_name || oldShop.shop_name, village_name || oldShop.village_name, oldShop.order_line_id, todayIST, oldBalance, dashboardBalance]);
+            }
 
-        // Recalculate daily collections balance ripple
-        await financialService.rebuildRipple(connection, id, todayIST);
+            if (oldBalance !== newBalance || parentShopIdChanged) {
+                // Recalculate daily collections balance ripple
+                await financialService.rebuildRipple(connection, id, todayIST);
 
-        // If parent shop ID changed, rebuild the old parent shop's ripple as well
-        if (parentShopIdChanged && oldShop.parent_shop_id) {
-            await financialService.rebuildRipple(connection, oldShop.parent_shop_id, todayIST);
-        }
+                // If parent shop ID changed, rebuild the old parent shop's ripple as well
+                if (parentShopIdChanged && oldShop.parent_shop_id) {
+                    await financialService.rebuildRipple(connection, oldShop.parent_shop_id, todayIST);
+                }
+            }
 
-        if (oldBalance !== newBalance) {
             webhookService.sendTransactionToWebhook({
                 shop_id: id,
-                shop_name: shop_name,
-                village_name: village_name || '',
-                specific_area: owner_name || '',
+                shop_name: shop_name || oldShop.shop_name,
+                village_name: village_name || oldShop.village_name,
+                specific_area: owner_name || oldShop.specific_area,
                 type: 'Adjustment',
-                amount: newBalance - oldBalance,
-                description: 'Manual Balance Update (Edit Shop)',
+                amount: amountDiff,
+                description: descriptionToSend,
                 balance_before: oldBalance,
                 balance_after: newBalance,
                 created_by: actingUserName

@@ -11,8 +11,8 @@ const authMiddleware = async (req, res, next) => {
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         
-        // Session Revocation Check for Staff
-        if (decoded.role === 'staff') {
+        // Session Revocation Check for Staff & Player
+        if (decoded.role === 'staff' || decoded.role === 'player') {
             try {
                 const [rows] = await db.query('SELECT revoked_at FROM app_settings WHERE id = 1');
                 if (rows && rows[0]) {

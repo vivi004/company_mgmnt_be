@@ -216,6 +216,25 @@ app.listen(PORT, async () => {
             }
         }
 
+        // --- SHOPS TABLE STABILIZATION ---
+        // Ensure without_label_enabled column exists
+        try {
+            const [existingShopsCols] = await db.query(`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shops' AND COLUMN_NAME = 'without_label_enabled'
+            `);
+            if (existingShopsCols.length === 0) {
+                await db.query(`
+                    ALTER TABLE shops 
+                    ADD COLUMN without_label_enabled BOOLEAN DEFAULT FALSE
+                `);
+                console.log("Column 'without_label_enabled' added to shops.");
+            }
+        } catch (e) {
+            console.error("Warning verifying 'without_label_enabled' column:", e.message);
+        }
+
         // Migration: Populate shop_id based on name matches for legacy bills
         try {
             await db.query(`

@@ -108,13 +108,22 @@ function recalculateTotalAmount(cart, customRates, dbRates) {
         let baseId = key;
         let isBox = false;
         let isLtr = false;
+        let isWl = false;
 
-        if (key.endsWith('_box')) {
-            baseId = key.slice(0, -4);
+        let workingKey = key;
+        if (workingKey.endsWith('_wl')) {
+            isWl = true;
+            workingKey = workingKey.slice(0, -3);
+        }
+
+        if (workingKey.endsWith('_box')) {
+            baseId = workingKey.slice(0, -4);
             isBox = true;
-        } else if (key.endsWith('_ltr')) {
-            baseId = key.slice(0, -4);
+        } else if (workingKey.endsWith('_ltr')) {
+            baseId = workingKey.slice(0, -4);
             isLtr = true;
+        } else {
+            baseId = workingKey;
         }
 
         // Get base price: customRates overrides database rates, which overrides hardcoded defaults
@@ -141,7 +150,7 @@ function recalculateTotalAmount(cart, customRates, dbRates) {
             total += basePrice * finalQty;
         } else {
             // Check if there is an item-specific override in custom rates (for non-variant base products)
-            const itemRate = parsedCustom[key] !== undefined ? parseFloat(parsedCustom[key]) : (ratesLookup[key] !== undefined ? parseFloat(ratesLookup[key]) : defaultPrice);
+            const itemRate = parsedCustom[workingKey] !== undefined ? parseFloat(parsedCustom[workingKey]) : (ratesLookup[workingKey] !== undefined ? parseFloat(ratesLookup[workingKey]) : defaultPrice);
             total += itemRate * parseFloat(quantity);
         }
     }

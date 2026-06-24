@@ -13,7 +13,7 @@ const getShopsByOrderLine = async (req, res) => {
     try {
         const [shops] = await db.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
-                    s.parent_shop_id, COALESCE(sb.balance, 0) as balance, s.created_at,
+                    s.parent_shop_id, s.without_label_enabled, COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.area_name,
                     CAST(EXISTS(
                         SELECT 1 FROM bills b 
@@ -42,7 +42,7 @@ const getAllShops = async (req, res) => {
     try {
         const [shops] = await db.query(
             `SELECT s.id, s.order_line_id, s.shop_name, s.village_name, s.owner_name, s.shop_owner, s.phone, s.phone2, 
-                    s.parent_shop_id, COALESCE(sb.balance, 0) as balance, s.created_at,
+                    s.parent_shop_id, s.without_label_enabled, COALESCE(sb.balance, 0) as balance, s.created_at,
                     ol.name AS ol_village_name, ol.area_name, ol.node_id
              FROM shops s
              LEFT JOIN shop_balances sb ON s.id = sb.shop_id
@@ -63,7 +63,7 @@ const createShop = async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by, parent_shop_id } = req.body;
+    let { order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, created_by, parent_shop_id, without_label_enabled } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -80,8 +80,8 @@ const createShop = async (req, res) => {
         
         // 1. Insert into shops
         const [result] = await connection.query(
-            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, parent_shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', parent_shop_id || null]
+            `INSERT INTO shops (order_line_id, shop_name, village_name, owner_name, shop_owner, phone, phone2, parent_shop_id, without_label_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [order_line_id, shop_name, village_name || '', owner_name || '', shop_owner || '', phone || '', phone2 || '', parent_shop_id || null, without_label_enabled ? 1 : 0]
         );
         const shopId = result.insertId;
 
@@ -162,14 +162,14 @@ const updateShop = async (req, res) => {
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     const { id } = req.params;
-    const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, parent_shop_id } = req.body;
+    const { shop_name, village_name, owner_name, shop_owner, phone, phone2, balance, parent_shop_id, without_label_enabled } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
         // Fetch current shop and balance
         const [oldShops] = await connection.query(`
-            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.parent_shop_id, s.phone, s.phone2, s.shop_owner
+            SELECT s.shop_name, s.village_name, s.owner_name as specific_area, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.parent_shop_id, s.phone, s.phone2, s.shop_owner, s.without_label_enabled
             FROM shops s
             LEFT JOIN shop_balances sb ON s.id = sb.shop_id
             WHERE s.id = ? FOR UPDATE
@@ -189,8 +189,8 @@ const updateShop = async (req, res) => {
 
         // 1. Update shops table (excluding balance)
         await connection.query(
-            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ?, parent_shop_id = ? WHERE id = ?`,
-            [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, newParentShopId, id]
+            `UPDATE shops SET shop_name = ?, village_name = ?, owner_name = ?, shop_owner = ?, phone = ?, phone2 = ?, order_line_id = ?, parent_shop_id = ?, without_label_enabled = ? WHERE id = ?`,
+            [shop_name || oldShop.shop_name, village_name || oldShop.village_name, owner_name || oldShop.specific_area, shop_owner || '', phone || '', phone2 || '', req.body.order_line_id || oldShop.order_line_id, newParentShopId, without_label_enabled !== undefined ? (without_label_enabled ? 1 : 0) : oldShop.without_label_enabled, id]
         );
 
         // 2. Update shop_balances table

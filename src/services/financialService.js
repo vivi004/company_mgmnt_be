@@ -10,7 +10,9 @@ async function rebuildRipple(connection, shopId, targetDate) {
 
     // Helper to get YYYY-MM-DD in IST
     const toISTDate = (date) => {
-        const d = typeof date === 'string' ? new Date(date) : date;
+        if (!date) return '2000-01-01';
+        const d = date instanceof Date ? date : new Date(date);
+        if (isNaN(d.getTime())) return '2000-01-01';
         return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     };
 

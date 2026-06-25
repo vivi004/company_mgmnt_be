@@ -408,6 +408,15 @@ app.listen(PORT, async () => {
         };
 
         try {
+            await createIndexSafely('idx_shop_transactions_shop_date', 'shop_transactions', 'shop_id, transaction_date');
+            await createIndexSafely('idx_shop_transactions_approval', 'shop_transactions', 'approval_status, transaction_date');
+            await createIndexSafely('idx_daily_collections_ol_date', 'daily_collections', 'order_line_id, collection_date');
+            await createIndexSafely('idx_daily_collections_shop_date', 'daily_collections', 'shop_id, collection_date');
+            await createIndexSafely('idx_daily_expenses_ol_date', 'daily_expenses', 'order_line_id, expense_date');
+            await createIndexSafely('idx_bills_shop_date', 'bills', 'shop_id, delivery_date');
+            await createIndexSafely('idx_bills_status_delivery', 'bills', 'status, delivery_date');
+            await createIndexSafely('idx_shops_order_line', 'shops', 'order_line_id');
+            await createIndexSafely('idx_order_lines_name', 'order_lines', 'name');
             await createIndexSafely('idx_product_returns_shop_date', 'product_returns', 'shop_id, return_date');
             await createIndexSafely('idx_product_returns_date', 'product_returns', 'return_date');
             await createIndexSafely('idx_shop_transactions_paginated', 'shop_transactions', 'shop_id, transaction_date, id DESC');

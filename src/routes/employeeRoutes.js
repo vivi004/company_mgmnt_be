@@ -17,7 +17,7 @@ const employeeValidation = [
     body('last_name').trim().notEmpty().withMessage('Last name is required'),
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('username').trim().notEmpty().withMessage('Username is required'),
-    body('role').isIn(['Admin', 'Staff', 'Player']).withMessage('Role must be Admin, Staff, or Player'),
+    body('role').isIn(['Admin', 'Staff', 'Player', 'Viewer']).withMessage('Role must be Admin, Staff, Player, or Viewer'),
     body('status').isIn(['Active', 'Suspended']).withMessage('Status must be Active or Suspended')
 ];
 

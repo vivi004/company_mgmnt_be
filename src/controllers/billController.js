@@ -693,6 +693,191 @@ exports.verifyBill = async (req, res) => {
     }
 };
 
+exports.verifyBillsBatch = async (req, res) => {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'Invalid or empty ids array' });
+    }
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Fetch and lock all bill details
+        const [bills] = await connection.query(`
+            SELECT id, shop_id, total_amount, is_applied_to_balance, created_by, status, invoice_no,
+                   DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str,
+                   DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str
+            FROM bills WHERE id IN (?) FOR UPDATE
+        `, [ids]);
+
+        if (bills.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'No bills found' });
+        }
+
+        // Get current date/today in IST
+        const [dateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
+        const todayStr = dateRows[0].today;
+
+        // Group bills by shop_id
+        const billsByShop = {};
+        for (const bill of bills) {
+            // Only verify if not already verified
+            if (bill.status !== 'Verified') {
+                await connection.query('UPDATE bills SET status = "Verified" WHERE id = ?', [bill.id]);
+                bill.status = 'Verified';
+            }
+
+            const deliveryDateStr = bill.delivery_date_str || bill.bill_date_str;
+            const isFutureBill = deliveryDateStr > todayStr;
+
+            // Only apply if not future date and not already applied
+            if (!isFutureBill && bill.is_applied_to_balance === 0) {
+                if (!billsByShop[bill.shop_id]) {
+                    billsByShop[bill.shop_id] = [];
+                }
+                billsByShop[bill.shop_id].push({
+                    bill,
+                    deliveryDateStr
+                });
+            }
+        }
+
+        const webhooksToSend = [];
+
+        // For each shop, process its bills
+        for (const shopId of Object.keys(billsByShop)) {
+            const shopBillsData = billsByShop[shopId];
+
+            // Lock shop balance
+            const [shops] = await connection.query(`
+                SELECT s.id, COALESCE(sb.balance, 0) as balance, s.order_line_id, s.shop_name, s.village_name, s.owner_name as specific_area
+                FROM shops s
+                LEFT JOIN shop_balances sb ON s.id = sb.shop_id
+                WHERE s.id = ? FOR UPDATE
+            `, [shopId]);
+
+            if (shops.length === 0) continue;
+            const shop = shops[0];
+
+            let currentBalance = parseFloat(shop.balance);
+            let earliestDateStr = null;
+
+            // Sort shop bills by deliveryDateStr (earliest first)
+            shopBillsData.sort((a, b) => a.deliveryDateStr.localeCompare(b.deliveryDateStr));
+
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const istTimestamp = istNow.toISOString().slice(0, 19).replace('T', ' ');
+
+            for (const { bill, deliveryDateStr } of shopBillsData) {
+                const amount = parseFloat(bill.total_amount) || 0;
+                const balanceBefore = currentBalance;
+                const finalBalance = balanceBefore + amount;
+                currentBalance = finalBalance;
+
+                if (!earliestDateStr || deliveryDateStr < earliestDateStr) {
+                    earliestDateStr = deliveryDateStr;
+                }
+
+                // 1. Insert into shop_transactions ledger
+                const [txResult] = await connection.query(`
+                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date)
+                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?)
+                `, [shop.id, amount, bill.id, `Invoice #${bill.invoice_no} (Verified & Applied)`, finalBalance, bill.created_by || 'Staff', istTimestamp]);
+
+                // 2. Update daily_collections row for delivery date
+                await connection.query(`
+                    INSERT INTO daily_collections
+                        (shop_id, shop_name, village_name, order_line_id, collection_date,
+                         todays_bill_amount, old_balance, total_balance, future_bills, manual_adjustments)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON DUPLICATE KEY UPDATE
+                        todays_bill_amount = todays_bill_amount + VALUES(todays_bill_amount),
+                        total_balance = old_balance + todays_bill_amount - (cash_collected + upi_collected + cheque_collected) + manual_adjustments
+                `, [shop.id, shop.shop_name, shop.village_name, shop.order_line_id,
+                    deliveryDateStr, amount, balanceBefore, finalBalance]);
+
+                // 3. Subtract from yesterday's future_bills if tracked there
+                const yesterdayIST = new Date(istNow.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                await connection.query(`
+                    UPDATE daily_collections
+                    SET future_bills = GREATEST(0, future_bills - ?)
+                    WHERE shop_id = ? AND collection_date = ?
+                `, [amount, shop.id, yesterdayIST]);
+
+                // 4. Update bill as applied
+                await connection.query(
+                    'UPDATE bills SET is_applied_to_balance = 1 WHERE id = ?',
+                    [bill.id]
+                );
+
+                // Queue webhook payload info (without balance_after since ripple will correct it)
+                webhooksToSend.push({
+                    txId: txResult.insertId,
+                    payload: {
+                        shop_id: shop.id,
+                        shop_name: shop.shop_name,
+                        village_name: shop.village_name,
+                        specific_area: shop.specific_area || '',
+                        type: 'Bill',
+                        amount: amount,
+                        description: `Invoice #${bill.invoice_no}`,
+                        balance_before: balanceBefore,
+                        created_by: bill.created_by || 'Staff',
+                        reference_id: bill.id
+                    }
+                });
+            }
+
+            // Update shop_balances table with final balance for this shop
+            await connection.query(
+                'INSERT INTO shop_balances (shop_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = VALUES(balance)',
+                [shop.id, currentBalance]
+            );
+
+            // Rebuild ripple exactly ONCE for this shop
+            if (earliestDateStr) {
+                await financialService.rebuildRipple(connection, shop.id, earliestDateStr);
+            }
+        }
+
+        await connection.commit();
+        cacheService.flush();
+
+        // Retrieve corrected balance_after for webhooks
+        if (webhooksToSend.length > 0) {
+            const txIds = webhooksToSend.map(w => w.txId);
+            const [correctedRows] = await connection.query(
+                'SELECT id, balance_after FROM shop_transactions WHERE id IN (?)',
+                [txIds]
+            );
+            const correctedMap = {};
+            correctedRows.forEach(r => {
+                correctedMap[r.id] = parseFloat(r.balance_after);
+            });
+
+            for (const w of webhooksToSend) {
+                const finalBalanceAfter = correctedMap[w.txId] !== undefined ? correctedMap[w.txId] : (w.payload.balance_before + w.payload.amount);
+                webhookService.sendTransactionToWebhook({
+                    ...w.payload,
+                    balance_after: finalBalanceAfter
+                });
+            }
+        }
+
+        res.json({
+            message: `Successfully verified and processed ${bills.length} bills.`
+        });
+    } catch (err) {
+        if (connection) await connection.rollback();
+        console.error('Error verifying bills batch:', err);
+        res.status(500).json({ error: 'Failed to verify bills batch', detail: err.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
 exports.deleteBill = async (req, res) => {
     const { id } = req.params;
     const connection = await db.getConnection();

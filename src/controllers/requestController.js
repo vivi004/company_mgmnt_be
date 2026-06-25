@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const notificationService = require('../services/notificationService');
 
 exports.submitProfileRequest = async (req, res) => {
     const { employee_id, first_name, last_name, email } = req.body;
@@ -59,6 +60,13 @@ exports.approveProfileRequest = async (req, res) => {
 
         await db.query('UPDATE profile_requests SET status = "Approved" WHERE id = ?', [id]);
         res.json({ message: 'Request approved and profile updated!' });
+
+        // Send push notification
+        notificationService.sendPushToUser(
+            request.employee_id,
+            "Profile Request Approved ✅",
+            "Your profile change request has been approved by the Admin."
+        ).catch(err => console.error("Push notify error:", err));
     } catch (err) {
         console.error('Error approving request:', err);
         res.status(500).json({ error: 'Failed to approve request' });
@@ -68,8 +76,17 @@ exports.approveProfileRequest = async (req, res) => {
 exports.rejectProfileRequest = async (req, res) => {
     const { id } = req.params;
     try {
+        const [requests] = await db.query('SELECT employee_id FROM profile_requests WHERE id = ?', [id]);
         await db.query('UPDATE profile_requests SET status = "Rejected" WHERE id = ?', [id]);
         res.json({ message: 'Request rejected.' });
+
+        if (requests.length > 0) {
+            notificationService.sendPushToUser(
+                requests[0].employee_id,
+                "Profile Request Rejected ❌",
+                "Your profile change request was rejected."
+            ).catch(err => console.error("Push notify error:", err));
+        }
     } catch (err) {
         console.error('Error rejecting request:', err);
         res.status(500).json({ error: 'Failed to reject request' });

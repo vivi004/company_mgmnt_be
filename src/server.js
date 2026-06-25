@@ -187,6 +187,25 @@ app.listen(PORT, async () => {
             VALUES (1, 1001, 1000)
         `);
 
+        // --- EMPLOYEES TABLE STABILIZATION ---
+        // Ensure expo_push_token column exists in employees table
+        try {
+            const [existingEmpCols] = await db.query(`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employees' AND COLUMN_NAME = 'expo_push_token'
+            `);
+            if (existingEmpCols.length === 0) {
+                await db.query(`
+                    ALTER TABLE employees 
+                    ADD COLUMN expo_push_token VARCHAR(255) DEFAULT NULL
+                `);
+                console.log("Column 'expo_push_token' added to employees.");
+            }
+        } catch (e) {
+            console.error("Warning verifying 'expo_push_token' column:", e.message);
+        }
+
         // --- BILLS TABLE STABILIZATION ---
         // Ensure all modern columns exist for financial synchronization
         const billColumns = [

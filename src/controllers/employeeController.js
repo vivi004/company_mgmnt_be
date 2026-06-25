@@ -109,3 +109,14 @@ exports.deleteEmployee = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
+exports.updatePushToken = async (req, res) => {
+    const { id } = req.params;
+    const { expo_push_token } = req.body;
+    try {
+        await db.query('UPDATE employees SET expo_push_token = ? WHERE id = ?', [expo_push_token || null, id]);
+        res.json({ message: 'Push token registered successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};

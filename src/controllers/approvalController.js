@@ -2,6 +2,7 @@ const db = require('../config/db');
 const financialService = require('../services/financialService');
 const webhookService = require('../services/webhookService');
 const cacheService = require('../services/cacheService');
+const notificationService = require('../services/notificationService');
 
 // GET all pending transactions for Admin
 const getPendingTransactions = async (req, res) => {
@@ -206,6 +207,19 @@ const approveTransactionsBulk = async (req, res) => {
         }
 
         res.json({ message: `Successfully approved ${results.length} transactions`, results });
+
+        // Send push notifications to creators in background
+        for (const tx of txs) {
+            if (tx.created_by) {
+                const formattedAmount = parseFloat(tx.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+                const typeStr = tx.transaction_category === 'PAYMENT' ? 'Payment collection' : 'Transaction';
+                notificationService.sendPushToUserByName(
+                    tx.created_by,
+                    "Transaction Approved! ✅",
+                    `Your ${typeStr} of ${formattedAmount} has been approved.`
+                ).catch(err => console.error("Push notify error:", err));
+            }
+        }
     } catch (err) {
         if (connection) await connection.rollback();
         console.error('approveTransactionsBulk error:', err);

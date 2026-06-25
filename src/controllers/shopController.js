@@ -3,6 +3,7 @@ const { validationResult } = require('express-validator');
 const webhookService = require('../services/webhookService');
 const financialService = require('../services/financialService');
 const cacheService = require('../services/cacheService');
+const notificationService = require('../services/notificationService');
 
 // Legacy local rebuildRipple removed in favor of financialService.rebuildRipple
 
@@ -598,6 +599,15 @@ const collectPayment = async (req, res) => {
             new_balance: newBalance,
             status: approvalStatus
         });
+
+        // Notify Admins if payment requires approval
+        if (isDigital) {
+            const formattedAmount = payAmount.toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+            notificationService.sendPushToAdmins(
+                "New Pending Collection 💰",
+                `${created_by || 'Staff'} submitted a digital/cheque payment of ${formattedAmount} for ${shop.shop_name} needing approval.`
+            ).catch(err => console.error("Admin push notify error:", err));
+        }
     } catch (err) {
         if (connection) await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -773,6 +783,15 @@ const adjustBalance = async (req, res) => {
             new_balance: newBalance,
             status: approvalStatus
         });
+
+        // Notify Admins if adjustment requires approval
+        if (!affectsBalance) {
+            const formattedAmount = adjAmount.toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+            notificationService.sendPushToAdmins(
+                "New Pending Adjustment ⚙️",
+                `${created_by || 'Staff'} submitted an adjustment of ${formattedAmount} for ${shop.shop_name} needing approval.`
+            ).catch(err => console.error("Admin push notify error:", err));
+        }
     } catch (err) {
         if (connection) await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -902,6 +921,17 @@ const approveTransaction = async (req, res) => {
         });
 
         res.json({ message: 'Transaction approved', new_balance: newBalance });
+
+        // Push notification to creator
+        if (tx.created_by) {
+            const formattedAmount = parseFloat(tx.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+            const typeStr = tx.transaction_category === 'PAYMENT' ? 'Payment collection' : 'Transaction';
+            notificationService.sendPushToUserByName(
+                tx.created_by,
+                "Transaction Approved! ✅",
+                `Your ${typeStr} of ${formattedAmount} for ${shop.shop_name} has been approved.`
+            ).catch(err => console.error("Push notify error:", err));
+        }
     } catch (err) {
         if (connection) await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -914,13 +944,34 @@ const rejectTransaction = async (req, res) => {
     const { tx_id } = req.params;
     const { reason } = req.body;
     try {
+        // Query transaction details before rejecting to send push notification
+        const [txs] = await db.query(
+            `SELECT t.created_by, t.amount, t.transaction_category, s.shop_name 
+             FROM shop_transactions t
+             JOIN shops s ON t.shop_id = s.id
+             WHERE t.id = ? AND t.approval_status = 'PENDING'`,
+            [tx_id]
+        );
+
         await db.query(
             "UPDATE shop_transactions SET approval_status = 'REJECTED', rejected_reason = ? WHERE id = ? AND approval_status = 'PENDING'",
             [reason || 'Rejected by Admin', tx_id]
         );
         cacheService.flush();
         res.json({ message: 'Transaction rejected' });
+
+        if (txs.length > 0 && txs[0].created_by) {
+            const tx = txs[0];
+            const formattedAmount = parseFloat(tx.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+            const typeStr = tx.transaction_category === 'PAYMENT' ? 'Payment collection' : 'Transaction';
+            notificationService.sendPushToUserByName(
+                tx.created_by,
+                "Transaction Rejected! ❌",
+                `Your ${typeStr} of ${formattedAmount} for ${tx.shop_name} was rejected. Reason: ${reason || 'Rejected by Admin'}`
+            ).catch(err => console.error("Push notify error:", err));
+        }
     } catch (err) {
+        console.error('Error rejecting transaction:', err);
         res.status(500).json({ error: 'Failed to reject transaction' });
     }
 };

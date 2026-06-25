@@ -35,6 +35,7 @@ router.put('/:id',
     employeeController.updateEmployee
 );
 router.put('/:id/profile-pic', authMiddleware, employeeController.updateProfilePic);
+router.put('/:id/push-token', authMiddleware, employeeController.updatePushToken);
 router.delete('/:id', authMiddleware, employeeController.deleteEmployee);
 
 module.exports = router;

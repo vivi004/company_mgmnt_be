@@ -336,8 +336,8 @@ exports.createBill = async (req, res) => {
         }
 
         const [billResult] = await connection.query(
-            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_edited_qty, is_edited_date, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, is_edited_qty ? 1 : 0, is_edited_date ? 1 : 0, isAppliedNow]
+            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_edited_qty, is_edited_date, is_applied_to_balance, original_cart, original_delivery_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, is_edited_qty ? 1 : 0, is_edited_date ? 1 : 0, isAppliedNow, cartJson, mysqlDeliveryDate]
         );
 
         // 8. Increment the next invoice number
@@ -448,7 +448,7 @@ exports.getAllBills = async (req, res) => {
         const [rows] = await db.query(`
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
-                   b.is_applied_to_balance, b.created_at, 
+                   b.is_applied_to_balance, b.created_at, b.original_cart, b.original_delivery_date, 
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(
                        dc.old_balance, 
@@ -487,7 +487,9 @@ exports.getAllBills = async (req, res) => {
             let custom_rates = row.custom_rates;
             try { if (typeof cart === 'string') cart = JSON.parse(cart); } catch { cart = {}; }
             try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
-            return { ...row, cart, custom_rates };
+            let original_cart = row.original_cart;
+            try { if (typeof original_cart === 'string') original_cart = JSON.parse(original_cart); } catch { original_cart = null; }
+            return { ...row, cart, custom_rates, original_cart };
         });
         res.json(mapped);
     } catch (err) {
@@ -505,7 +507,7 @@ exports.getUnverifiedBills = async (req, res) => {
         const [rows] = await db.query(`
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
-                   b.is_applied_to_balance, b.created_at, 
+                   b.is_applied_to_balance, b.created_at, b.original_cart, b.original_delivery_date, 
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(
                        dc.old_balance, 
@@ -544,7 +546,9 @@ exports.getUnverifiedBills = async (req, res) => {
             let custom_rates = row.custom_rates;
             try { if (typeof cart === 'string') cart = JSON.parse(cart); } catch { cart = {}; }
             try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
-            return { ...row, cart, custom_rates };
+            let original_cart = row.original_cart;
+            try { if (typeof original_cart === 'string') original_cart = JSON.parse(original_cart); } catch { original_cart = null; }
+            return { ...row, cart, custom_rates, original_cart };
         });
         res.json(mapped);
     } catch (err) {
@@ -1305,7 +1309,7 @@ exports.getBillsByDateRange = async (req, res) => {
         let query = `
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
                    b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
-                   b.is_applied_to_balance, b.created_at,
+                   b.is_applied_to_balance, b.created_at, b.original_cart, b.original_delivery_date,
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(
                        dc.old_balance, 
@@ -1360,7 +1364,9 @@ exports.getBillsByDateRange = async (req, res) => {
             let custom_rates = row.custom_rates;
             try { if (typeof cart === 'string') cart = JSON.parse(cart); } catch { cart = {}; }
             try { if (typeof custom_rates === 'string') custom_rates = JSON.parse(custom_rates); } catch { custom_rates = {}; }
-            return { ...row, cart, custom_rates };
+            let original_cart = row.original_cart;
+            try { if (typeof original_cart === 'string') original_cart = JSON.parse(original_cart); } catch { original_cart = null; }
+            return { ...row, cart, custom_rates, original_cart };
         });
         res.json(mapped);
     } catch (err) {

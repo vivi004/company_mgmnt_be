@@ -215,7 +215,9 @@ app.listen(PORT, async () => {
             { name: 'is_edited_price', type: 'BOOLEAN DEFAULT FALSE' },
             { name: 'is_edited_qty', type: 'BOOLEAN DEFAULT FALSE' },
             { name: 'is_edited_date', type: 'BOOLEAN DEFAULT FALSE' },
-            { name: 'is_applied_to_balance', type: 'BOOLEAN DEFAULT FALSE' }
+            { name: 'is_applied_to_balance', type: 'BOOLEAN DEFAULT FALSE' },
+            { name: 'original_cart', type: 'JSON DEFAULT NULL' },
+            { name: 'original_delivery_date', type: 'DATETIME DEFAULT NULL' }
         ];
 
         // Retrieve existing column list to prevent duplicate-column SQL exceptions

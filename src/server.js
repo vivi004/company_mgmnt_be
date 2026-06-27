@@ -213,6 +213,8 @@ app.listen(PORT, async () => {
             { name: 'total_amount', type: 'DECIMAL(12, 2) DEFAULT 0.00' },
             { name: 'delivery_date', type: 'DATETIME DEFAULT NULL' },
             { name: 'is_edited_price', type: 'BOOLEAN DEFAULT FALSE' },
+            { name: 'is_edited_qty', type: 'BOOLEAN DEFAULT FALSE' },
+            { name: 'is_edited_date', type: 'BOOLEAN DEFAULT FALSE' },
             { name: 'is_applied_to_balance', type: 'BOOLEAN DEFAULT FALSE' }
         ];
 

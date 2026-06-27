@@ -159,7 +159,7 @@ function recalculateTotalAmount(cart, customRates, dbRates) {
 }
 
 exports.createBill = async (req, res) => {
-    const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price } = req.body;
+    const { shop_id, phone, cart, custom_rates, bill_date, status, total_amount, delivery_date, is_edited_price, is_edited_qty, is_edited_date } = req.body;
     let { shop_name, village_name, created_by } = req.body;
     
     // Trim names to prevent lookup errors
@@ -336,8 +336,8 @@ exports.createBill = async (req, res) => {
         }
 
         const [billResult] = await connection.query(
-            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, isAppliedNow]
+            'INSERT INTO bills (shop_id, invoice_no, shop_name, village_name, cart, custom_rates, created_by, bill_date, delivery_date, status, total_amount, is_edited_price, is_edited_qty, is_edited_date, is_applied_to_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [shop.id, String(assignedInvoiceNo), shop.shop_name, shop.village_name, cartJson, ratesJson, created_by || 'Staff', mysqlDate, mysqlDeliveryDate, status || 'Unverified', amount, is_edited_price ? 1 : 0, is_edited_qty ? 1 : 0, is_edited_date ? 1 : 0, isAppliedNow]
         );
 
         // 8. Increment the next invoice number
@@ -447,7 +447,7 @@ exports.getAllBills = async (req, res) => {
         // Primary ledger = only verified bills
         const [rows] = await db.query(`
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
-                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
                    b.is_applied_to_balance, b.created_at, 
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(
@@ -504,7 +504,7 @@ exports.getUnverifiedBills = async (req, res) => {
     try {
         const [rows] = await db.query(`
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
-                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
                    b.is_applied_to_balance, b.created_at, 
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(
@@ -1009,7 +1009,7 @@ exports.deleteBill = async (req, res) => {
 
 exports.updateBill = async (req, res) => {
     const { id } = req.params;
-    const { cart, custom_rates, total_amount, is_edited_price } = req.body;
+    const { cart, custom_rates, total_amount, is_edited_price, is_edited_qty, is_edited_date } = req.body;
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -1021,7 +1021,7 @@ exports.updateBill = async (req, res) => {
             delivery_date,
             DATE_FORMAT(delivery_date, '%Y-%m-%d') as delivery_date_str, 
             DATE_FORMAT(bill_date, '%Y-%m-%d') as bill_date_str,
-            cart, custom_rates, is_edited_price 
+            cart, custom_rates, is_edited_price, is_edited_qty, is_edited_date 
             FROM bills WHERE id = ? FOR UPDATE
         `, [id]);
         if (bills.length === 0) throw new Error('Bill not found');
@@ -1119,16 +1119,18 @@ exports.updateBill = async (req, res) => {
             // is_applied_to_balance = 0 means bill was deferred (future), 1 means already applied
             const isOldFuture = bill.is_applied_to_balance === 0;
             const isEditedPriceFinal = is_edited_price !== undefined ? (is_edited_price ? 1 : 0) : (bill.is_edited_price || 0);
+            const isEditedQtyFinal = is_edited_qty !== undefined ? (is_edited_qty ? 1 : 0) : (bill.is_edited_qty || 0);
+            const isEditedDateFinal = is_edited_date !== undefined ? (is_edited_date ? 1 : 0) : (bill.is_edited_date || 0);
 
             // ── UPDATE BILLS TABLE FIRST ──
             // rebuildRipple queries bills WHERE is_applied_to_balance = 0 for future_bills.
             // Updating bills BEFORE rebuildRipple ensures it sees the correct delivery_date and amount.
             await connection.query(
-                'UPDATE bills SET cart=?, custom_rates=?, total_amount=?, delivery_date=?, is_edited_price=?, is_applied_to_balance=? WHERE id=?',
+                'UPDATE bills SET cart=?, custom_rates=?, total_amount=?, delivery_date=?, is_edited_price=?, is_edited_qty=?, is_edited_date=?, is_applied_to_balance=? WHERE id=?',
                 [
                     JSON.stringify(finalCart),
                     JSON.stringify(finalCustomRates),
-                    newAmount, mysqlDeliveryDate, isEditedPriceFinal,
+                    newAmount, mysqlDeliveryDate, isEditedPriceFinal, isEditedQtyFinal, isEditedDateFinal,
                     isFutureNew ? 0 : 1, id
                 ]
             );
@@ -1299,7 +1301,7 @@ exports.getBillsByDateRange = async (req, res) => {
     try {
         let query = `
             SELECT b.id, b.shop_id, b.invoice_no, b.shop_name, b.village_name, b.cart, b.custom_rates, 
-                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, 
+                   b.created_by, b.bill_date, b.delivery_date, b.status, b.total_amount, b.is_edited_price, b.is_edited_qty, b.is_edited_date, 
                    b.is_applied_to_balance, b.created_at,
                    s.phone, s.phone2, s.order_line_id, s.owner_name as specific_area, ol.area_name,
                    COALESCE(

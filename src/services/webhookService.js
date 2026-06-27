@@ -220,9 +220,9 @@ exports.retryFailedSyncs = async () => {
                 console.log(`[RETRY] Successfully synced transaction ID ${t.id}.`);
             } catch (err) {
                 console.error(`[RETRY] Failed to sync transaction ID ${t.id}:`, err.message);
-                // Break chronological retry chain if webhook is completely offline or returns error
-                console.log('[RETRY] Network/API error encountered during retry. Aborting remaining retries.');
-                break;
+                // Continue to next transaction to prevent a single permanent failure from blocking the entire sync queue
+                console.log('[RETRY] Continuing to next transaction in queue.');
+                continue;
             }
         }
     } catch (err) {

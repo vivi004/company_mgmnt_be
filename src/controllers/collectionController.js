@@ -3,6 +3,19 @@ const cacheService = require('../services/cacheService');
 const webhookService = require('../services/webhookService');
 const financialService = require('../services/financialService');
 
+async function getActingUserName(connection, userId) {
+    if (!userId) return 'Admin';
+    try {
+        const [users] = await connection.query('SELECT first_name, last_name FROM employees WHERE id = ?', [userId]);
+        if (users.length > 0) {
+            return `${users[0].first_name} ${users[0].last_name || ''}`.trim();
+        }
+    } catch (e) {
+        console.error('Failed to fetch user name:', e);
+    }
+    return 'Admin';
+}
+
 /**
  * GET /api/collections?date=YYYY-MM-DD
  * Returns all daily_collections grouped by order_line for the given date.
@@ -398,6 +411,8 @@ exports.editPaymentTransaction = async (req, res) => {
     try {
         await connection.beginTransaction();
 
+        const actingUserName = await getActingUserName(connection, req.user ? req.user.id : null);
+
         // Retrieve existing transaction
         const [txs] = await connection.query(
             'SELECT shop_id, type, amount, payment_mode, transaction_date, description FROM shop_transactions WHERE id = ? FOR UPDATE',
@@ -466,7 +481,7 @@ exports.editPaymentTransaction = async (req, res) => {
                 description: `REVERSED (EDITED): ${tx.description}`,
                 balance_before: revBalanceBefore,
                 balance_after: revBalanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
 
             // 2. Push the New updated transaction details
@@ -481,7 +496,7 @@ exports.editPaymentTransaction = async (req, res) => {
                 description: `${newDesc} (EDITED)`,
                 balance_before: updBalanceBefore,
                 balance_after: updBalanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
         } catch (webhookErr) {
             console.error('Failed to send edit payment webhooks:', webhookErr);
@@ -515,6 +530,8 @@ exports.editAdjustmentTransaction = async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
+
+        const actingUserName = await getActingUserName(connection, req.user ? req.user.id : null);
 
         // Retrieve existing transaction
         const [txs] = await connection.query(
@@ -584,7 +601,7 @@ exports.editAdjustmentTransaction = async (req, res) => {
                 description: `REVERSED (EDITED): ${tx.description}`,
                 balance_before: revBalanceBefore,
                 balance_after: revBalanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
 
             // 2. Push the New updated transaction details
@@ -599,7 +616,7 @@ exports.editAdjustmentTransaction = async (req, res) => {
                 description: `${newDesc} (EDITED)`,
                 balance_before: updBalanceBefore,
                 balance_after: updBalanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
         } catch (webhookErr) {
             console.error('Failed to send edit adjustment webhooks:', webhookErr);
@@ -628,6 +645,8 @@ exports.deleteTransaction = async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
+
+        const actingUserName = await getActingUserName(connection, req.user ? req.user.id : null);
 
         // Retrieve existing transaction
         const [txs] = await connection.query(
@@ -701,7 +720,7 @@ exports.deleteTransaction = async (req, res) => {
                 description: `REVERSED / DELETED: ${tx.description} (DELETED)`,
                 balance_before: balanceBefore,
                 balance_after: balanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
         } catch (webhookErr) {
             console.error('Failed to send delete transaction webhook:', webhookErr);
@@ -898,6 +917,8 @@ exports.addRetroactiveTransaction = async (req, res) => {
         const currentISTTime = istNow.toISOString().slice(11, 19); // HH:MM:SS
         const mysqlDate = `${date} ${currentISTTime}`;
 
+        const actingUserName = await getActingUserName(connection, req.user ? req.user.id : null);
+
         // Retrieve current balance before inserting/rippling
         const [balBeforeRows] = await connection.query(
             'SELECT COALESCE(balance, 0) as balance FROM shop_balances WHERE shop_id = ?',
@@ -910,16 +931,16 @@ exports.addRetroactiveTransaction = async (req, res) => {
             INSERT INTO shop_transactions 
                 (shop_id, type, amount, payment_mode, payment_method, transaction_category, description, 
                  balance_after, approval_status, affects_balance, created_by, transaction_date) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'APPROVED', 1, 'Admin', ?)
-        `, [shopId, txType, txAmount, txMode, txMode, txCategory, txDesc, mysqlDate]);
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'APPROVED', 1, ?, ?)
+        `, [shopId, txType, txAmount, txMode, txMode, txCategory, txDesc, actingUserName, mysqlDate]);
 
         // If it is a Return, also insert into product_returns
         if (txType === 'Return') {
             const productName = description ? description.replace('Product Return: ', '') : 'Returned Product';
             await connection.query(`
                 INSERT INTO product_returns (shop_id, product_name, amount, created_by, return_date)
-                VALUES (?, ?, ?, 'Admin', ?)
-            `, [shopId, productName, txAmount, date]);
+                VALUES (?, ?, ?, ?, ?)
+            `, [shopId, productName, txAmount, actingUserName, date]);
         }
 
         // Ripple calculation starting from the target date
@@ -948,7 +969,7 @@ exports.addRetroactiveTransaction = async (req, res) => {
                 description: `${txDesc} (APPROVED)`,
                 balance_before: balanceBefore,
                 balance_after: balanceAfter,
-                created_by: 'Admin'
+                created_by: actingUserName
             });
         } catch (webhookErr) {
             console.error('Failed to send retroactive transaction webhook:', webhookErr);

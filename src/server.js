@@ -346,9 +346,15 @@ app.listen(PORT, async () => {
             if (columns.length === 0) {
                 await db.query(`
                     ALTER TABLE shop_transactions 
-                    ADD COLUMN is_synced_to_sheet TINYINT DEFAULT 1
+                    ADD COLUMN is_synced_to_sheet TINYINT DEFAULT 0
                 `);
                 console.log("Added column 'is_synced_to_sheet' to shop_transactions");
+            } else {
+                // Ensure default is 0 for transactional outbox safety
+                await db.query(`
+                    ALTER TABLE shop_transactions 
+                    ALTER COLUMN is_synced_to_sheet SET DEFAULT 0
+                `);
             }
         } catch (e) {
             console.error("Warning verifying 'is_synced_to_sheet' column:", e.message);

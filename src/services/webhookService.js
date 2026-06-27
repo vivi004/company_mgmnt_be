@@ -21,6 +21,17 @@ function formatIST(dateObj) {
 async function findTransactionId(transactionData) {
     if (!transactionData || Array.isArray(transactionData)) return null;
     try {
+        // If reference_id is provided, try looking up by reference_id and type first (most accurate for bills)
+        if (transactionData.reference_id) {
+            const [refRows] = await db.query(
+                'SELECT id FROM shop_transactions WHERE shop_id = ? AND type = ? AND reference_id = ? ORDER BY id DESC LIMIT 1',
+                [transactionData.shop_id, transactionData.type, transactionData.reference_id]
+            );
+            if (refRows.length > 0) {
+                return refRows[0].id;
+            }
+        }
+
         let query = `
             SELECT id, is_synced_to_sheet 
             FROM shop_transactions 
@@ -58,13 +69,13 @@ async function findTransactionId(transactionData) {
  * Pushes a transaction (or batch of transactions) to the Google Sheets Ledger.
  * Saves synchronization status in the database to allow automatic retry recovery.
  */
-exports.sendTransactionToWebhook = async (transactionData) => {
+exports.sendTransactionToWebhook = async (transactionData, explicitTxId = null) => {
     const isArray = Array.isArray(transactionData);
     
     // For a single transaction, identify the primary database record ID first
-    let txId = null;
-    if (!isArray) {
-        txId = await findTransactionId(transactionData);
+    let txId = explicitTxId;
+    if (!isArray && !txId) {
+        txId = transactionData.transaction_id || transactionData.txId || await findTransactionId(transactionData);
     }
 
     const url = process.env.LEDGER_WEBHOOK_URL;
@@ -105,9 +116,9 @@ exports.sendTransactionToWebhook = async (transactionData) => {
         console.log(`Pushing ${payloads.length} transaction(s) to Ledger (Google Sheets)...`);
         
         if (isArray) {
-            await axios.post(url, payloads);
+            await axios.post(url, payloads, { timeout: 15000 });
         } else {
-            await axios.post(url, payloads[0]);
+            await axios.post(url, payloads[0], { timeout: 15000 });
         }
         
         console.log('Transaction(s) pushed to webhook successfully');
@@ -202,7 +213,7 @@ exports.retryFailedSyncs = async () => {
 
             try {
                 console.log(`[RETRY] Retrying transaction ID ${t.id} for shop ${t.shop_name} (amount: ${amountToSend})...`);
-                await axios.post(url, payload);
+                await axios.post(url, payload, { timeout: 15000 });
                 
                 // Flip synced state to 1 upon success
                 await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 1 WHERE id = ?', [t.id]);

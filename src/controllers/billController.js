@@ -585,6 +585,7 @@ exports.verifyBill = async (req, res) => {
 
         let webhookPayload = null;
         let isAppliedNow = false;
+        let insertedTxId = null;
 
         // If today or past delivery date, and not applied yet, apply now!
         if (!isFutureBill && bill.is_applied_to_balance === 0) {
@@ -617,6 +618,8 @@ exports.verifyBill = async (req, res) => {
                     INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date)
                     VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?)
                 `, [shop.id, amount, bill.id, `Invoice #${bill.invoice_no} (Verified & Applied)`, finalBalance, bill.created_by || 'Staff', istTimestamp]);
+
+                insertedTxId = txResult.insertId;
 
                 // 3. Update daily_collections row for delivery date
                 await connection.query(`
@@ -676,7 +679,7 @@ exports.verifyBill = async (req, res) => {
 
         // 7. Send webhook outside transaction lock to prevent holding DB connections open
         if (webhookPayload) {
-            webhookService.sendTransactionToWebhook(webhookPayload);
+            webhookService.sendTransactionToWebhook(webhookPayload, insertedTxId);
         }
 
         res.json({
@@ -862,7 +865,7 @@ exports.verifyBillsBatch = async (req, res) => {
                 webhookService.sendTransactionToWebhook({
                     ...w.payload,
                     balance_after: finalBalanceAfter
-                });
+                }, w.txId);
             }
         }
 

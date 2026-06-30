@@ -83,7 +83,11 @@ exports.sendTransactionToWebhook = async (transactionData, explicitTxId = null) 
         // If the webhook URL is not configured, mark the transaction as unsynced for later automatic retry
         if (txId) {
             try {
-                await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id = ?', [txId]);
+                if (Array.isArray(txId)) {
+                    await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id IN (?)', [txId]);
+                } else {
+                    await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id = ?', [txId]);
+                }
             } catch (dbErr) {
                 console.error('Failed to update unsynced state when webhook URL is missing:', dbErr.message);
             }
@@ -125,7 +129,11 @@ exports.sendTransactionToWebhook = async (transactionData, explicitTxId = null) 
 
         // If the push succeeded, mark the transaction record as synced (1)
         if (txId) {
-            await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 1 WHERE id = ?', [txId]);
+            if (Array.isArray(txId)) {
+                await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 1 WHERE id IN (?)', [txId]);
+            } else {
+                await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 1 WHERE id = ?', [txId]);
+            }
         }
     } catch (err) {
         console.error('CRITICAL: Failed to push transaction to ledger (Google Sheets):', err.message);
@@ -133,8 +141,12 @@ exports.sendTransactionToWebhook = async (transactionData, explicitTxId = null) 
         // If the push failed, mark the transaction as unsynced (0) to queue it for automatic retry background task
         if (txId) {
             try {
-                await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id = ?', [txId]);
-                console.log(`Marked transaction ID ${txId} as unsynced (is_synced_to_sheet = 0) for retry.`);
+                if (Array.isArray(txId)) {
+                    await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id IN (?)', [txId]);
+                } else {
+                    await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 0 WHERE id = ?', [txId]);
+                }
+                console.log(`Marked transaction ID(s) ${txId} as unsynced (is_synced_to_sheet = 0) for retry.`);
             } catch (dbErr) {
                 console.error('Failed to update unsynced state in catch block:', dbErr.message);
             }

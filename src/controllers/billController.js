@@ -864,13 +864,19 @@ exports.verifyBillsBatch = async (req, res) => {
                 correctedMap[r.id] = parseFloat(r.balance_after);
             });
 
+            const batchPayloads = [];
+            const batchTxIds = [];
             for (const w of webhooksToSend) {
                 const finalBalanceAfter = correctedMap[w.txId] !== undefined ? correctedMap[w.txId] : (w.payload.balance_before + w.payload.amount);
-                webhookService.sendTransactionToWebhook({
+                batchPayloads.push({
                     ...w.payload,
                     balance_after: finalBalanceAfter
-                }, w.txId);
+                });
+                batchTxIds.push(w.txId);
             }
+
+            // Send all payloads as a single batch and await it to prevent concurrency issues
+            await webhookService.sendTransactionToWebhook(batchPayloads, batchTxIds);
         }
 
         res.json({

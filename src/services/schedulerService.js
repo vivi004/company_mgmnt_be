@@ -168,9 +168,15 @@ async function applyDueBills() {
         console.log(`[CRON] Applied ${dueBills.length} delivery-date bills to shop balances.`);
 
         // 8. Send all webhooks AFTER commit, with ripple-corrected balance_after values
-        for (const payload of pendingWebhooks) {
-            const { tx_id, ...webhookData } = payload; // Strip internal tx_id before sending
-            webhookService.sendTransactionToWebhook(webhookData);
+        if (pendingWebhooks.length > 0) {
+            const batchPayloads = [];
+            const batchTxIds = [];
+            for (const payload of pendingWebhooks) {
+                const { tx_id, ...webhookData } = payload; // Strip internal tx_id before sending
+                batchPayloads.push(webhookData);
+                batchTxIds.push(tx_id);
+            }
+            await webhookService.sendTransactionToWebhook(batchPayloads, batchTxIds);
         }
 
     } catch (err) {

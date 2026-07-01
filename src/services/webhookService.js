@@ -193,7 +193,7 @@ exports.retryFailedSyncs = async () => {
             const balanceAfter = parseFloat(t.balance_after);
             
             // Reconstruct the balance before mutation
-            const isPayment = t.type === 'Payment' || t.transaction_category === 'PAYMENT';
+            const isPayment = t.type === 'Payment' || (t.type !== 'Bill' && t.type !== 'Adjustment' && t.transaction_category === 'PAYMENT');
             const balanceBefore = isPayment ? (balanceAfter + amount) : (balanceAfter - amount);
             const amountToSend = isPayment ? -amount : amount;
 

@@ -97,8 +97,8 @@ async function applyDueBills() {
 
                 // 2. Log ledger entry (use explicit IST timestamp, not NOW() which uses server tz)
                 const [txResult] = await connection.query(
-                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, runningBalance, bill.created_by || 'System', istTimestamp]
+                    'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date, transaction_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [bill.shop_id, 'Bill', amount, bill.id, `Delivery Due — Invoice Applied`, runningBalance, bill.created_by || 'System', istTimestamp, 'BILL']
                 );
                 insertedTxIds.push(txResult.insertId);
 

@@ -239,8 +239,8 @@ const updateShop = async (req, res) => {
 
             const mysqlDate = new Date();
             await connection.query(
-                'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [id, 'Adjustment', amountDiff, descriptionToSend, newBalance, actingUserName, mysqlDate]
+                'INSERT INTO shop_transactions (shop_id, type, amount, description, balance_after, created_by, transaction_date, transaction_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [id, 'Adjustment', amountDiff, descriptionToSend, newBalance, actingUserName, mysqlDate, 'MANUAL_ADJUST']
             );
 
             if (oldBalance !== newBalance) {

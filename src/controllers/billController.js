@@ -349,8 +349,8 @@ exports.createBill = async (req, res) => {
         if (!isFutureBill) {
             // 7. Create Shop Transaction (Ledger Entry)
             await connection.query(
-                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate]
+                'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date, transaction_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate, 'BILL']
             );
 
             // Push to Webhook (Google Sheets)
@@ -619,8 +619,8 @@ exports.verifyBill = async (req, res) => {
 
                 // 2. Insert into shop_transactions ledger
                 const [txResult] = await connection.query(`
-                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date)
-                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?)
+                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date, transaction_category)
+                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?, 'BILL')
                 `, [shop.id, amount, bill.id, `Invoice #${bill.invoice_no} (Verified & Applied)`, finalBalance, bill.created_by || 'Staff', istTimestamp]);
 
                 insertedTxId = txResult.insertId;
@@ -789,8 +789,8 @@ exports.verifyBillsBatch = async (req, res) => {
 
                 // 1. Insert into shop_transactions ledger
                 const [txResult] = await connection.query(`
-                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date)
-                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?)
+                    INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date, transaction_category)
+                    VALUES (?, 'Bill', ?, ?, ?, ?, ?, ?, 'BILL')
                 `, [shop.id, amount, bill.id, `Invoice #${bill.invoice_no} (Verified & Applied)`, finalBalance, bill.created_by || 'Staff', istTimestamp]);
 
                 // 2. Update daily_collections row for delivery date
@@ -1172,8 +1172,8 @@ exports.updateBill = async (req, res) => {
                 // Applying a deferred bill now: INSERT its ledger tx (rebuildRipple will fix balance_after).
                 await connection.query(
                     `INSERT INTO shop_transactions
-                         (shop_id, type, amount, reference_id, description, balance_after, transaction_date, created_by)
-                     VALUES (?, 'Bill', ?, ?, ?, 0, ?, ?)`,
+                         (shop_id, type, amount, reference_id, description, balance_after, transaction_date, created_by, transaction_category)
+                     VALUES (?, 'Bill', ?, ?, ?, 0, ?, ?, 'BILL')`,
                     [collShop.id, newAmount, id, `Invoice #${bill.invoice_no}`, newDateStr, actingUserName]
                 );
                 // Remove from today's future_bills column

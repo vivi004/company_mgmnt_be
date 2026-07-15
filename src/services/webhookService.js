@@ -249,7 +249,7 @@ exports.retryFailedSyncs = async () => {
 
             try {
                 console.log(`[RETRY] Retrying transaction ID ${t.id} for shop ${t.shop_name} (amount: ${amountToSend})...`);
-                await axios.post(url, payload, { timeout: 15000 });
+                await axios.post(url, payload, { timeout: 60000 });
                 
                 // Flip synced state to 1 upon success
                 await db.query('UPDATE shop_transactions SET is_synced_to_sheet = 1 WHERE id = ?', [t.id]);

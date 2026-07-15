@@ -320,6 +320,8 @@ exports.createBill = async (req, res) => {
         const billDateOnly = mysqlDate.split(' ')[0];
         const deliveryDateOnly = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : billDateOnly;
         const isFutureBill = deliveryDateOnly > todayStr;
+        const currentISTTime = mysqlDate.split(' ')[1]; // Get HH:mm:ss
+        const transactionDateWithTime = `${deliveryDateOnly} ${currentISTTime}`;
 
         // ── BALANCE APPLICATION ──
         // Future-dated bills: do NOT apply to shop_balances immediately.
@@ -350,7 +352,7 @@ exports.createBill = async (req, res) => {
             // 7. Create Shop Transaction (Ledger Entry)
             await connection.query(
                 'INSERT INTO shop_transactions (shop_id, type, amount, reference_id, description, balance_after, created_by, transaction_date, transaction_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', mysqlDeliveryDate || mysqlDate, 'BILL']
+                [shop.id, 'Bill', amount, billResult.insertId, `Invoice #${assignedInvoiceNo}`, finalBalance, created_by || 'Staff', transactionDateWithTime, 'BILL']
             );
 
             // Push to Webhook (Google Sheets)
@@ -1127,6 +1129,9 @@ exports.updateBill = async (req, res) => {
             const newDateStr = mysqlDeliveryDate ? mysqlDeliveryDate.split(' ')[0] : bill.bill_date_str;
             const [todayDateRows] = await connection.query("SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', '+05:30'), '%Y-%m-%d') as today");
             const todayStrUpd = todayDateRows[0].today;
+            const istNow = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+            const currentISTTime = istNow.toISOString().slice(11, 19);
+            const newTransactionDateWithTime = `${newDateStr} ${currentISTTime}`;
 
             const isFutureNew = newDateStr > todayStrUpd;
             // is_applied_to_balance = 0 means bill was deferred (future), 1 means already applied
@@ -1174,7 +1179,7 @@ exports.updateBill = async (req, res) => {
                     `INSERT INTO shop_transactions
                          (shop_id, type, amount, reference_id, description, balance_after, transaction_date, created_by, transaction_category)
                      VALUES (?, 'Bill', ?, ?, ?, 0, ?, ?, 'BILL')`,
-                    [collShop.id, newAmount, id, `Invoice #${bill.invoice_no}`, newDateStr, actingUserName]
+                    [collShop.id, newAmount, id, `Invoice #${bill.invoice_no}`, newTransactionDateWithTime, actingUserName]
                 );
                 // Remove from today's future_bills column
                 await connection.query(
@@ -1192,7 +1197,7 @@ exports.updateBill = async (req, res) => {
                     await connection.query(
                         `UPDATE shop_transactions SET transaction_date = ?, description = ?, amount = ?
                          WHERE shop_id = ? AND reference_id = ? AND type = 'Bill'`,
-                        [newDateStr, `Invoice #${bill.invoice_no} (Date Edited)`, newAmount, collShop.id, id]
+                        [newTransactionDateWithTime, `Invoice #${bill.invoice_no} (Date Edited)`, newAmount, collShop.id, id]
                     );
 
                     // MASTER SYNC from the earliest affected date

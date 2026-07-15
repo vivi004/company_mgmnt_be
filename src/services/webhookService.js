@@ -5,13 +5,14 @@ const db = require('../config/db');
  * Format Date object to IST YYYY-MM-DD HH:mm:ss string
  */
 function formatIST(dateObj) {
-    const yyyy = dateObj.getFullYear();
-    const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const dd = String(dateObj.getDate()).padStart(2, '0');
-    const hh = String(dateObj.getHours()).padStart(2, '0');
-    const min = String(dateObj.getMinutes()).padStart(2, '0');
-    const ss = String(dateObj.getSeconds()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+    const istTime = new Date(dateObj.getTime() + (5.5 * 60 * 60 * 1000));
+    const yyyy = istTime.getUTCFullYear();
+    const mm = String(istTime.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(istTime.getUTCDate()).padStart(2, '0');
+    const hh = String(istTime.getUTCHours()).padStart(2, '0');
+    const min = String(istTime.getUTCMinutes()).padStart(2, '0');
+    const ss = String(istTime.getUTCSeconds()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}+05:30`;
 }
 
 /**
@@ -96,33 +97,56 @@ exports.sendTransactionToWebhook = async (transactionData, explicitTxId = null) 
     }
 
     try {
-        // Build IST timestamp manually to be robust against varying hosting server environments (Railway/Render etc)
+        // Fetch accurate transaction_date from DB if txId is available
+        let dbTimestamps = {};
+        if (txId) {
+            try {
+                const idsToFetch = Array.isArray(txId) ? txId.filter(Boolean) : [txId];
+                if (idsToFetch.length > 0) {
+                    const [rows] = await db.query('SELECT id, transaction_date FROM shop_transactions WHERE id IN (?)', [idsToFetch]);
+                    rows.forEach(r => {
+                        dbTimestamps[r.id] = r.transaction_date;
+                    });
+                }
+            } catch (dbErr) {
+                console.error('Failed to fetch transaction_date for webhook:', dbErr.message);
+            }
+        }
+
+        // Build current IST timestamp manually as a fallback
         const now = new Date();
         const istOffset = 5.5 * 60 * 60 * 1000;
         const istTime = new Date(now.getTime() + istOffset);
-        const istTimestamp = istTime.toISOString().replace('T', ' ').split('.')[0];
+        const istTimestamp = istTime.toISOString().replace('T', ' ').split('.')[0] + '+05:30';
         
         let payloads = [];
         if (isArray) {
-            payloads = transactionData.map(item => ({
-                ...item,
-                payment_method: item.payment_method || 'N/A',
-                timestamp: item.timestamp || istTimestamp
-            }));
+            payloads = transactionData.map((item, index) => {
+                const correspondingTxId = Array.isArray(txId) ? txId[index] : null;
+                const dbDate = correspondingTxId ? dbTimestamps[correspondingTxId] : null;
+                const timestampToUse = dbDate ? formatIST(new Date(dbDate)) : (item.timestamp || istTimestamp);
+                return {
+                    ...item,
+                    payment_method: item.payment_method || 'N/A',
+                    timestamp: timestampToUse
+                };
+            });
         } else {
+            const dbDate = txId ? dbTimestamps[txId] : null;
+            const timestampToUse = dbDate ? formatIST(new Date(dbDate)) : (transactionData.timestamp || istTimestamp);
             payloads.push({
                 ...transactionData,
                 payment_method: transactionData.payment_method || 'N/A',
-                timestamp: istTimestamp
+                timestamp: timestampToUse
             });
         }
 
         console.log(`Pushing ${payloads.length} transaction(s) to Ledger (Google Sheets)...`);
         
         if (isArray) {
-            await axios.post(url, payloads, { timeout: 15000 });
+            await axios.post(url, payloads, { timeout: 60000 });
         } else {
-            await axios.post(url, payloads[0], { timeout: 15000 });
+            await axios.post(url, payloads[0], { timeout: 60000 });
         }
         
         console.log('Transaction(s) pushed to webhook successfully');
